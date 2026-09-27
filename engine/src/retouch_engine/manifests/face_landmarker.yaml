@@ -1,0 +1,17 @@
+id: face_landmarker
+name: MediaPipe Face Landmarker
+task: face_landmarks
+licence: Apache-2.0
+licence_url: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker#models
+commercial_use: true
+bundled_default: true
+quality_note: "478 landmarks per face; locates eyes and skin for the face tools"
+source:
+  kind: url
+  # Google's official model bundle. Versioned path, and verified by checksum.
+  url: https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+  sha256: 64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff
+  filename: face_landmarker.task
+adapter: mediapipe_face
+input_edge: 2048
+min_vram_gb: 0

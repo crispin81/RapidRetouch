@@ -1,0 +1,397 @@
+/* Bundled locally rather than fetched from Google Fonts at runtime - a
+   desktop app shouldn't depend on a live network connection just to render
+   its own UI text correctly. Font-metric fallback (system sans-serif in
+   place of Poppins) when that fetch fails/is slow is also why the packaged
+   app could look subtly larger/differently-spaced than it does in dev,
+   where the fetch reliably succeeds. */
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-300.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/poppins-400-italic.woff2") format("woff2");
+}
+
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3b45 transparent;
+}
+
+/* Chromium (Windows' WebView2) and WebKit (Linux/macOS) both support this
+   legacy pseudo-element API, so this alone covers every platform Tauri
+   targets - a themed scrollbar instead of each OS's own default chrome. */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: #3a3b45;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #ffcc33;
+}
+
+button, input, select {
+  font-family: inherit;
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid #ffcc33;
+  outline-offset: 1px;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #14151a;
+  color: #e6e6ea;
+  font-family: "Poppins", system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid #2f3039;
+  border-radius: 6px;
+  background: #22232a;
+  color: #e6e6ea;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: #ffcc33;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.active,
+button.primary {
+  background: #ffcc33;
+  border-color: #ffcc33;
+  color: #14151a;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "toolbar toolbar"
+    "viewer sidebar"
+    "status status";
+  height: 100%;
+}
+
+.toolbar {
+  grid-area: toolbar;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1b1c22;
+  border-bottom: 1px solid #26272e;
+}
+
+.toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+}
+
+.toolbar__zoom {
+  min-width: 44px;
+  color: #8d8e99;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+.toolbar__info {
+  color: #8d8e99;
+  font-size: 12px;
+}
+
+.viewer {
+  grid-area: viewer;
+  position: relative;
+  overflow: hidden;
+  background: #101114;
+}
+
+.viewer__box {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.viewer__stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.paint-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.viewer__image,
+.viewer__detail {
+  /* WebKit ignores draggable="false" for images; without this a click-drag on
+     the photo picks it up instead of painting. */
+  -webkit-user-drag: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+.viewer__image {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.viewer__detail {
+  position: absolute;
+}
+
+.viewer__empty {
+  color: #6d6e78;
+}
+
+.viewer__badge {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: rgba(20, 21, 26, 0.85);
+  color: #ffcc33;
+  font-size: 12px;
+}
+
+.sidebar {
+  grid-area: sidebar;
+  overflow-y: auto;
+  background: #1b1c22;
+  border-left: 1px solid #26272e;
+}
+
+.panel + .panel {
+  border-top: 1px solid #26272e;
+}
+
+.panel {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b7b8c2;
+}
+
+.panel__buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.panel__model {
+  margin: 0;
+  color: #6d6e78;
+  font-size: 11px;
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #b7b8c2;
+}
+
+.slider__head {
+  display: flex;
+  justify-content: space-between;
+}
+
+.slider__value {
+  color: #8d8e99;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom-styled rather than left to the native OS slider widget, which renders
+   inconsistently across platforms. The gold/grey fill split is set inline. */
+.slider input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+.slider input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+.slider input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.statusbar {
+  grid-area: status;
+  padding: 5px 12px;
+  background: #1b1c22;
+  border-top: 1px solid #26272e;
+  color: #8d8e99;
+  font-size: 12px;
+}
+
+.statusbar__error {
+  color: #ff8a80;
+  cursor: pointer;
+}
+
+.spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 4px;
+  border: 2px solid #3a3b45;
+  border-top-color: #ffcc33;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -1px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.modal__box {
+  width: 420px;
+  padding: 20px;
+  border-radius: 10px;
+  background: #1b1c22;
+  border: 1px solid #2f3039;
+}
+
+.modal__box h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.modal__link {
+  color: #8d8e99;
+  font-size: 11px;
+  word-break: break-all;
+  user-select: text;
+}
+
+.modal__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

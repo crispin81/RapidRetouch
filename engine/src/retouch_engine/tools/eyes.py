@@ -1,0 +1,410 @@
+"""Under-eye retouching: dark circles and eye bags.
+
+Both work per eye, located by face landmarks, with every distance measured in
+eye widths so a headshot and a full-length group behave the same, and so do the
+preview and the full-resolution export.
+
+Dark circles: the under-eye skin's broad tone is moved toward what the skin
+around it (cheek below, the sides) says it should be, interpolated across the
+zone. Interpolating from the surroundings rather than sampling one cheek patch
+keeps split-lit faces right: each eye is corrected toward its own lighting.
+Brightness is only ever raised; colour moves toward the surrounding skin (the
+purple/blue cast). Only the low-frequency tone changes, so texture is kept.
+
+Wrinkles: fine lines under the eye and crow's feet. Lines are about the size of
+pores, so smoothing that detail band would erase skin texture and look plastic.
+Instead a Hessian (curvature) filter picks out long, thin dark valleys — lines
+respond strongly, round pores barely at all — and only those are lifted toward
+the skin around them (a morphological closing: the skin as if the line weren't
+there). Anything much darker than a wrinkle (lashes, brow tails, stray hairs)
+is left alone, and the zones are clipped to the face outline.
+
+Eye bags: frequency-separated dodge and burn. Light and shade at "bag" scale
+(bigger than pores and fine lines, smaller than the face's lighting) is
+flattened — the crease shadow lifted more than the bulge's highlight is toned
+down — so fine texture is untouched. The crease line itself (tear trough /
+lid-cheek junction) is narrower than that band, so the same slider also lifts
+it with the wrinkle line filler, tuned wider and allowed to go further.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from .colour import linear_to_srgb, srgb_to_linear
+from .filters import masked_blur
+
+# MediaPipe Face Mesh indices, each curve listed outer corner -> inner corner.
+EYES = {
+    "right": {
+        "corners": (33, 133),
+        "lid": [33, 7, 163, 144, 145, 153, 154, 155, 133],
+        "contour": [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
+        "brow": [70, 63, 105, 66, 107, 55, 65, 52, 53, 46],
+    },
+    "left": {
+        "corners": (263, 362),
+        "lid": [263, 249, 390, 373, 374, 380, 381, 382, 362],
+        "contour": [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466],
+        "brow": [300, 293, 334, 296, 336, 285, 295, 282, 283, 276],
+    },
+}
+
+# MediaPipe face outline; wrinkle zones are clipped to it (no hair, ears, backdrop).
+FACE_OVAL = [
+    10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378,
+    400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21,
+    54, 103, 67, 109,
+]
+
+CURVE_POINTS = 24
+MIN_EYE_PX = 12  # smaller eyes than this aren't worth touching
+FORESHORTENED = 0.35  # skip an eye narrower than this fraction of the other
+
+# Shapes and scales, in eye widths.
+LASH_CLEARANCE = 0.08  # zones start this far below the lash line
+# Zone depth below the lash line, straight down the face. The cheek landmarks sit
+# too high on some faces to bound the zones: the bag's crease shadow (and the
+# tear trough running down toward the nose) can lie well below them, and a zone
+# ending on the crease lifts everything above it into a pale pad with a dark rim.
+# Generous zones are safe: skin is only lifted where it's darker than its
+# surroundings predict, so already-even skin inside the zone is left alone.
+DARK_CIRCLE_DEPTH = 0.7
+BAG_DEPTH = 0.8
+INNER_EXTEND = 0.2  # zones continue this far past the inner corner (tear trough)
+OUTER_EXTEND = 0.1
+FEATHER = 0.15
+SURROUND = 0.5  # how far around the zone to look for reference skin
+TONE_SIGMA = 0.12  # scale of the tone being corrected
+REFERENCE_SIGMA = 0.35
+BAG_FINE = 0.035  # below this scale is texture, left alone
+BAG_COARSE = 0.22  # above this scale is facial lighting, left alone
+
+# Wrinkles, in eye widths unless noted.
+WRINKLE_SCALES = (0.010, 0.018, 0.028)  # line half-widths the detector looks for
+WRINKLE_CLEARANCE = 0.04  # closer to the lashes than the other zones
+WRINKLE_DEPTH = 0.55
+WRINKLE_OUTER_EXTEND = 0.3  # under-eye zone runs out to meet the crow's feet
+LINE_LOW, LINE_HIGH = 0.4, 1.1  # line strength ramp, Lab L units
+# Deep expression folds are softened as a whole, by the same fraction across
+# their profile, keeping their shape. Excluding their darkest pixels instead
+# hollows the fold out, leaving a thin drawn-on line in a flattened patch.
+FOLD_LOW, FOLD_HIGH = 8.0, 18.0  # Lab L depth over which a line counts as a fold
+FOLD_KEEP = 0.6  # share of a deep fold's depth that's kept
+TOO_DARK_LOW, TOO_DARK_HIGH = 22.0, 30.0  # far deeper than any wrinkle: stray hairs
+BROW_CLEARANCE = 0.12  # eyebrows are protected, with this margin
+WRINKLE_MAX = 1.0
+
+# The line under the bag, lifted by the Eye bags slider.
+CREASE_SCALES = (0.02, 0.035, 0.05)  # wider than wrinkles
+# Starts below the lashes but high enough to take in the lower-eyelid crease,
+# which sits about 0.2-0.3 eye widths down; a short feather at the top so it
+# gets the full lift (lashes are also protected by the eye exclusion and the
+# too-dark guard).
+CREASE_TOP = 0.12
+CREASE_FEATHER = 0.06
+CREASE_FOLD_KEEP = 0.15  # removing this line is the point, so little is kept
+
+MAX_LIFT = 20.0  # Lab L units
+MAX_COLOUR_SHIFT = 15.0  # Lab a/b units
+BAG_MAX = 0.85  # full slider still leaves a little shape; 100% looks unnatural
+BURN_RATIO = 0.6  # highlights toned down less than creases are lifted
+COLOUR_MATCH_L = 8.0  # lifts this big (Lab L) take on the surrounding skin's colour
+COLOUR_MATCH_SIGMA = 0.08  # neighbourhood for that colour, in eye widths
+
+
+@dataclass
+class Params:
+    dark_circles: float = 0.5
+    eye_bags: float = 0.4
+    wrinkles: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Params":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+    def is_noop(self) -> bool:
+        return self.dark_circles <= 0 and self.eye_bags <= 0 and self.wrinkles <= 0
+
+
+def _resample(pts: np.ndarray, n: int = CURVE_POINTS) -> np.ndarray:
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    t = np.concatenate([[0], np.cumsum(seg)])
+    u = np.linspace(0, t[-1], n)
+    return np.stack([np.interp(u, t, pts[:, 0]), np.interp(u, t, pts[:, 1])], axis=1)
+
+
+def _poly_mask(shape, poly: np.ndarray) -> np.ndarray:
+    mask = np.zeros(shape, np.uint8)
+    cv2.fillPoly(mask, [np.round(poly * 16).astype(np.int32)], 1, lineType=cv2.LINE_AA, shift=4)
+    return mask.astype(np.float32)
+
+
+def _inner_feather(hard: np.ndarray, sigma: float) -> np.ndarray:
+    """Soft mask that is exactly zero at the polygon edge and ramps up inside it."""
+    soft = cv2.GaussianBlur(hard, (0, 0), max(0.5, sigma))
+    return np.clip((soft - 0.5) * 2, 0, 1) * hard
+
+
+def _face_down(lm: np.ndarray) -> np.ndarray:
+    """Unit vector down the face: perpendicular to the line between the outer eye
+    corners, pointing toward the mouth. Robust to head tilt."""
+    across = lm[263] - lm[33]
+    down = np.array([-across[1], across[0]], np.float32)
+    down /= max(float(np.linalg.norm(down)), 1e-6)
+    if np.dot(lm[13] - (lm[33] + lm[263]) / 2, down) < 0:  # 13 = upper lip
+        down = -down
+    return down
+
+
+def _extend(curve: np.ndarray, before: float, after: float) -> np.ndarray:
+    """Continue a curve past both ends along its end directions."""
+    d0 = curve[0] - curve[1]
+    d1 = curve[-1] - curve[-2]
+    d0 /= max(float(np.linalg.norm(d0)), 1e-6)
+    d1 /= max(float(np.linalg.norm(d1)), 1e-6)
+    return np.concatenate([[curve[0] + d0 * before], curve, [curve[-1] + d1 * after]])
+
+
+def _eye_geometry(lm: np.ndarray, spec: dict):
+    outer, inner = lm[spec["corners"][0]], lm[spec["corners"][1]]
+    eye_w = float(np.linalg.norm(outer - inner))
+    down = _face_down(lm)
+    lid = _resample(lm[spec["lid"]])  # outer corner -> inner corner
+    top = _extend(lid, OUTER_EXTEND * eye_w, INNER_EXTEND * eye_w) + LASH_CLEARANCE * eye_w * down
+    wtop = (
+        _extend(lid, WRINKLE_OUTER_EXTEND * eye_w, INNER_EXTEND * eye_w)
+        + WRINKLE_CLEARANCE * eye_w * down
+    )
+    out = (outer - inner) / max(eye_w, 1e-6)  # away from the nose
+    up = -down
+    # Crow's feet: a fan beyond the outer corner, not reaching up to the brow.
+    crows = outer + eye_w * np.array(
+        [0.05 * out + 0.25 * up, 0.9 * out + 0.4 * up, 1.05 * out, 0.9 * out + 0.55 * down,
+         0.1 * out + 0.35 * down],
+        np.float32,
+    )
+    return {
+        "eye_w": eye_w,
+        "lid": lid,
+        "dark_circle": np.concatenate([top, (top + DARK_CIRCLE_DEPTH * eye_w * down)[::-1]]),
+        "bag": np.concatenate([top, (top + BAG_DEPTH * eye_w * down)[::-1]]),
+        "under_eye_lines": np.concatenate([wtop, (wtop + WRINKLE_DEPTH * eye_w * down)[::-1]]),
+        "bag_crease": np.concatenate(
+            [
+                top + (CREASE_TOP - LASH_CLEARANCE) * eye_w * down,
+                (top + (BAG_DEPTH + 0.1) * eye_w * down)[::-1],
+            ]
+        ),
+        "crows_feet": crows,
+        "face": lm[FACE_OVAL],
+        "contour": lm[spec["contour"]],
+        "brow": lm[spec["brow"]],
+    }
+
+
+def _below_lid(shape, lid: np.ndarray, eye_w: float) -> np.ndarray:
+    """Everything under the lower lid line (extended sideways), so reference
+    skin is never taken from the eye, upper lid or brow."""
+    ext = 0.6 * eye_w
+    left = lid[0] + (lid[0] - lid[1]) / np.linalg.norm(lid[0] - lid[1]) * ext
+    right = lid[-1] + (lid[-1] - lid[-2]) / np.linalg.norm(lid[-1] - lid[-2]) * ext
+    far = 10 * eye_w
+    poly = np.concatenate([[left], lid, [right], [right + [0, far]], [left + [0, far]]])
+    return _poly_mask(shape, poly)
+
+
+def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    t = np.clip((x - lo) / (hi - lo), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def _line_strength(
+    L: np.ndarray, eye_w: float, scales: tuple[float, ...] = WRINKLE_SCALES
+) -> np.ndarray:
+    """How strongly each pixel sits in a thin dark line (Lab L units, >= 0).
+
+    The largest Hessian eigenvalue is large and positive across a dark valley;
+    along a line the other is near zero, while on a round pore both are similar.
+    The (1 - |l2|/l1) factor keeps lines and suppresses pores."""
+    strength = np.zeros_like(L)
+    for scale in scales:
+        sigma = max(0.7, scale * eye_w)
+        g = cv2.GaussianBlur(L, (0, 0), sigma)
+        gy, gx = np.gradient(g)
+        gxy, gxx = np.gradient(gx)
+        gyy, _ = np.gradient(gy)
+        half_tr = (gxx + gyy) / 2
+        root = np.sqrt(((gxx - gyy) / 2) ** 2 + gxy**2)
+        l1, l2 = half_tr + root, half_tr - root  # l1 >= l2
+        line = sigma**2 * l1 * (1 - np.clip(np.abs(l2) / np.maximum(l1, 1e-6), 0, 1))
+        strength = np.maximum(strength, np.where(l1 > 0, line, 0))
+    return strength
+
+
+def _wrinkle_lift(
+    L: np.ndarray,
+    zone: np.ndarray,
+    eye_w: float,
+    scales: tuple[float, ...] = WRINKLE_SCALES,
+    fold_keep: float = FOLD_KEEP,
+) -> np.ndarray:
+    """Lab L increment that fills the lines in ``zone`` at full strength."""
+    s_max = max(0.7, scales[-1] * eye_w)
+    k = 2 * round(2.5 * s_max) + 1
+    # Closing removes dark features narrower than the kernel: the skin as it
+    # would be without the line. Pores are filled too, but only lines are used.
+    filled = cv2.morphologyEx(L, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    filled = cv2.GaussianBlur(filled, (0, 0), max(0.5, 0.5 * s_max))
+    # The lift is kept smooth at pore scale, so pores inside a line still show
+    # through it instead of being filled in along with the line.
+    depth = np.clip(filled - L, 0, None)
+    depth = cv2.GaussianBlur(depth, (0, 0), max(0.5, 0.6 * scales[0] * eye_w))
+    weight = _smoothstep(_line_strength(L, eye_w, scales), LINE_LOW, LINE_HIGH)
+    kd = 2 * round(1.5 * s_max) + 1
+    weight = cv2.dilate(weight, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kd, kd)))
+    weight = cv2.GaussianBlur(weight, (0, 0), s_max)
+    # How deep the line is around each pixel, so a fold is judged as a whole.
+    kf = 2 * round(3 * s_max) + 1
+    near = cv2.dilate(depth, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kf, kf)))
+    near = cv2.GaussianBlur(near, (0, 0), s_max)
+    fold = 1 - fold_keep * _smoothstep(near, FOLD_LOW, FOLD_HIGH)
+    not_hair = 1 - _smoothstep(depth, TOO_DARK_LOW, TOO_DARK_HIGH)
+    return depth * weight * fold * not_hair * zone
+
+
+def _lab_l_to_y(L: np.ndarray) -> np.ndarray:
+    """CIE L* -> relative luminance Y (0..1)."""
+    f = (L + 16) / 116
+    return np.where(L > 8, f**3, L / 903.3)
+
+
+def _relight(lab: np.ndarray, dL: np.ndarray, eye_w: float) -> None:
+    """Raise Lab lightness by ``dL`` as a change of *light*, in place.
+
+    Lifting L alone leaves chroma behind, so skin lifted out of shadow turns
+    flat and grey; scaling a/b along with it blows up the noisy colour of the
+    darkest pixels into red. What a real change of light does is multiply
+    linear RGB by a gain, keeping each pixel's colour proportions — so that's
+    what this does, with the gain set to hit the requested lightness.
+
+    Skin inside a crease is also genuinely redder (light scatters under the
+    skin there), so a lifted crease would keep that tint as a pink line. The
+    more a pixel is lifted, the more its colour is taken from the unlifted skin
+    around it."""
+    old_ab = lab[..., 1:].copy()
+    old = lab[..., 0]
+    gain = _lab_l_to_y(np.clip(old + dL, 0, 100)) / np.maximum(_lab_l_to_y(old), 1e-4)
+    gain = np.clip(gain, 0.25, 4.0)[..., None]
+    lin = srgb_to_linear(np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)) * gain
+    lab[:] = cv2.cvtColor(
+        linear_to_srgb(np.clip(lin, 0, 1)).astype(np.float32), cv2.COLOR_RGB2Lab
+    )
+    t = _smoothstep(dL, 0.0, COLOUR_MATCH_L)
+    if t.max() <= 0:
+        return
+    around = masked_blur(old_ab, (1 - t) ** 2, max(0.5, COLOUR_MATCH_SIGMA * eye_w))
+    lab[..., 1:] += t[..., None] * (around - lab[..., 1:])
+
+
+def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
+    """Edit one eye's surroundings of ``rgb`` in place."""
+    h, w = rgb.shape[:2]
+    eye_w = geo["eye_w"]
+    pts = np.concatenate([geo["bag"], geo["contour"], geo["crows_feet"]])
+    margin = (SURROUND + 0.3) * eye_w
+    x0, y0 = np.maximum(np.floor(pts.min(0) - margin), 0).astype(int)
+    x1, y1 = np.minimum(np.ceil(pts.max(0) + margin), [w, h]).astype(int)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return
+    off = np.array([x0, y0], np.float32)
+    crop = rgb[y0:y1, x0:x1]
+    shape = crop.shape[:2]
+    lab = cv2.cvtColor(np.clip(crop, 0, 1), cv2.COLOR_RGB2Lab)
+
+    below = _below_lid(shape, geo["lid"] - off, eye_w)
+    eye_hole = cv2.dilate(
+        _poly_mask(shape, geo["contour"] - off),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * round(0.12 * eye_w) + 1,) * 2),
+    )
+    skin_below = below * (1 - eye_hole)
+
+    # Wrinkles first, while the fine detail is still exactly as shot.
+    if p.wrinkles > 0:
+        face = _poly_mask(shape, geo["face"] - off)
+        kb = 2 * round(BROW_CLEARANCE * eye_w) + 1
+        brow = cv2.dilate(
+            _poly_mask(shape, cv2.convexHull(geo["brow"] - off)[:, 0]),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kb, kb)),
+        )
+        zone = np.maximum(
+            _poly_mask(shape, geo["under_eye_lines"] - off),
+            _poly_mask(shape, geo["crows_feet"] - off),
+        ) * face * (1 - eye_hole) * (1 - brow)
+        soft = _inner_feather(zone, FEATHER * eye_w)
+        L = np.ascontiguousarray(lab[..., 0])
+        _relight(lab, p.wrinkles * WRINKLE_MAX * _wrinkle_lift(L, soft, eye_w), eye_w)
+
+    if p.dark_circles > 0:
+        zone = _poly_mask(shape, geo["dark_circle"] - off)
+        k = 2 * round(SURROUND * eye_w) + 1
+        near = cv2.dilate(zone, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        k2 = 2 * round(0.05 * eye_w) + 1
+        gap = cv2.dilate(zone, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2)))
+        ring = near * (1 - gap) * skin_below
+        if ring.sum() > 50:
+            expected = masked_blur(lab, ring, REFERENCE_SIGMA * eye_w)
+            current = masked_blur(lab, zone * (1 - eye_hole), TONE_SIGMA * eye_w)
+            delta = expected - current
+            delta[..., 0] = np.clip(delta[..., 0], 0, MAX_LIFT)
+            delta[..., 1:] = np.clip(delta[..., 1:], -MAX_COLOUR_SHIFT, MAX_COLOUR_SHIFT)
+            delta = cv2.GaussianBlur(delta, (0, 0), max(0.5, 0.1 * eye_w))
+            soft = _inner_feather(zone, FEATHER * eye_w)
+            lab += p.dark_circles * soft[..., None] * delta
+
+    if p.eye_bags > 0:
+        crease = _poly_mask(shape, geo["bag_crease"] - off) * (1 - eye_hole)
+        L = np.ascontiguousarray(lab[..., 0])
+        _relight(
+            lab,
+            p.eye_bags
+            * _wrinkle_lift(
+                L,
+                _inner_feather(crease, CREASE_FEATHER * eye_w),
+                eye_w,
+                CREASE_SCALES,
+                CREASE_FOLD_KEEP,
+            ),
+            eye_w,
+        )
+        zone = _poly_mask(shape, geo["bag"] - off)
+        L = np.ascontiguousarray(lab[..., 0])
+        fine = cv2.GaussianBlur(L, (0, 0), max(0.5, BAG_FINE * eye_w))
+        coarse = masked_blur(L, skin_below, BAG_COARSE * eye_w)
+        mid = fine - coarse
+        adjust = np.where(mid < 0, -mid, -BURN_RATIO * mid)
+        soft = _inner_feather(zone, FEATHER * eye_w)
+        _relight(lab, p.eye_bags * BAG_MAX * soft * adjust, eye_w)
+
+    rgb[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+
+def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
+    """rgb float32 HxWx3 0..1; faces are (478, 2) landmark arrays as fractions of
+    width/height (from the face landmark model). Returns a new rgb."""
+    out = rgb.copy()
+    if p.is_noop():
+        return out
+    h, w = rgb.shape[:2]
+    for face in faces:
+        lm = face * np.array([w, h], np.float32)
+        geos = {side: _eye_geometry(lm, spec) for side, spec in EYES.items()}
+        widest = max(g["eye_w"] for g in geos.values())
+        for geo in geos.values():
+            if geo["eye_w"] < MIN_EYE_PX or geo["eye_w"] < FORESHORTENED * widest:
+                continue
+            _correct_eye(out, geo, p)
+    return out

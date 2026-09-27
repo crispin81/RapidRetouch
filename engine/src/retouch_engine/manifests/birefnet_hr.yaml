@@ -1,0 +1,16 @@
+id: birefnet_hr
+name: BiRefNet HR
+task: subject_mask
+licence: MIT
+licence_url: https://huggingface.co/ZhengPeng7/BiRefNet_HR
+commercial_use: true
+bundled_default: true
+quality_note: "High-resolution subject masking, good on hair"
+source:
+  kind: huggingface
+  repo: ZhengPeng7/BiRefNet_HR
+  # Pinned: loading this model runs Python code from the repo, so never float to main.
+  revision: a7a562f6fd16021180f2f4348f4de003a2d3d1e1
+adapter: birefnet
+input_size: 2048
+min_vram_gb: 4
