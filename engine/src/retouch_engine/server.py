@@ -33,6 +33,8 @@ METHODS = {
     "models",
     "accept_licence",
     "open",
+    "thumbnail",
+    "forget",
     "mask",
     "mask_paint",
     "undo_mask_edit",
@@ -95,6 +97,9 @@ class Engine:
         # it depends on, shared by zoomed-in detail views and export.
         self._full: dict[str, tuple] = {}
         self._eye_masks: dict[tuple, np.ndarray] = {}  # eye openings, per image size
+        # Edits of photos in the film strip that aren't open right now, by path.
+        # Only the edit lists are kept (cheap); pixels are recomputed on return.
+        self.sessions: dict[str, dict] = {}
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
@@ -130,6 +135,13 @@ class Engine:
         return {"accepted": model_id}
 
     def open(self, path: str) -> dict:
+        # Keep the current photo's edits so switching back restores them.
+        if self.path is not None:
+            self.sessions[str(self.path)] = {
+                "strokes": self.strokes,
+                "mask_edits": self.mask_edits,
+                "faces": self.faces,
+            }
         self.status(f"Loading {Path(path).name}")
         self.path = Path(path)
         self.image = imageio.load(path)
@@ -142,13 +154,36 @@ class Engine:
         self.backdrop_cache = {}
         self.strokes, self.filled_previews = [], []
         self.edit_version += 1
+        saved = self.sessions.pop(str(self.path), None)
+        if saved:
+            self.mask_edits = saved["mask_edits"]
+            self.faces = saved["faces"]
+            base = self.preview
+            for i, stroke in enumerate(saved["strokes"], 1):
+                self.status(f"Restoring edits ({i} of {len(saved['strokes'])})")
+                base = self._apply_stroke(base, stroke)
+                self.filled_previews.append(base)
+            self.strokes = list(saved["strokes"])
         h, w = self.image.rgb.shape[:2]
         return {
             "width": w,
             "height": h,
             "bit_depth": self.image.bit_depth,
             "preview": _jpeg_b64(self.preview),
+            "removals": len(self.strokes),
+            "mask_edits": len(self.mask_edits),
         }
+
+    def thumbnail(self, path: str, edge: int = 240) -> dict:
+        """Film-strip thumbnail (base64 JPEG)."""
+        buf = io.BytesIO()
+        imageio.thumbnail(path, edge).save(buf, "JPEG", quality=85)
+        return {"image": base64.b64encode(buf.getvalue()).decode()}
+
+    def forget(self, path: str) -> dict:
+        """Drop the stored edits of a photo taken out of the film strip."""
+        self.sessions.pop(str(path), None)
+        return {"forgotten": path}
 
     def _ensure_mask(self, model_id: str | None = None) -> None:
         manifest = (

@@ -31,9 +31,17 @@ import PaintOverlay from "./PaintOverlay";
 import Slider from "./Slider";
 import Viewer, { Detail, ViewerHandle } from "./Viewer";
 import TitleBar from "./TitleBar";
+import FilmStrip, { StripItem } from "./FilmStrip";
+
+interface PhotoSettings {
+  backdrop: BackdropParams;
+  eyes: EyesParams;
+}
+const sameSettings = (a: PhotoSettings, b: PhotoSettings) =>
+  JSON.stringify(a) === JSON.stringify(b);
 
 const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
-// No Retouch tutorial yet: the banner says so until this is set.
+// No tutorial video yet: the banner does nothing until this is set.
 const TUTORIAL_VIDEO_URL: string | null = null;
 const TUTORIAL_DISMISSED_KEY = "retouch.tutorialDismissed";
 
@@ -198,6 +206,11 @@ export default function App() {
   const [zoomLabel, setZoomLabel] = useState("Fit");
   const [detail, setDetail] = useState<Detail | null>(null);
   const viewerRef = useRef<ViewerHandle>(null);
+  // Film strip: every photo opened this session, each with its own settings.
+  const [strip, setStrip] = useState<StripItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [copied, setCopied] = useState<PhotoSettings | null>(null);
+  const settingsByPath = useRef(new Map<string, PhotoSettings>());
   const [tutorialDismissed, setTutorialDismissed] = useState(() => {
     try {
       return localStorage.getItem(TUTORIAL_DISMISSED_KEY) === "1";
@@ -368,6 +381,9 @@ export default function App() {
       } else if (view !== "mask" && (e.key === "b" || e.key === "B")) {
         setBrushOn((on) => !on);
         setZoomTool(false);
+      } else if (!e.ctrlKey && !e.metaKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        step(e.key === "ArrowRight" ? 1 : -1);
       } else if (e.key === "[" || e.key === "]") {
         // Resize whichever brush is in use.
         const factor = e.key === "]" ? 1.2 : 1 / 1.2;
@@ -379,12 +395,58 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  const currentSettings = (): PhotoSettings => ({
+    backdrop: paramsRef.current,
+    eyes: eyesRef.current,
+  });
+
+  const applySettings = (st: PhotoSettings) => {
+    paramsRef.current = st.backdrop;
+    eyesRef.current = st.eyes;
+    setParams(st.backdrop);
+    setEyesParams(st.eyes);
+  };
+
+  const markEdited = (path: string, st: PhotoSettings) =>
+    setStrip((items) =>
+      items.map((i) =>
+        i.path === path
+          ? { ...i, edited: !sameSettings(st, { backdrop: DEFAULTS, eyes: EYE_DEFAULTS }) }
+          : i,
+      ),
+    );
+
+  /** Make ``path`` the photo being edited, keeping the current one's settings
+   * (unless it's being taken out of the strip). */
+  const loadImage = async (path: string, keepCurrent = true) => {
+    if (image && keepCurrent) {
+      settingsByPath.current.set(image.path, currentSettings());
+      markEdited(image.path, currentSettings());
+    }
+    setError(null);
+    setResult(null);
+    setMask(null);
+    setView("result");
+    setFaces(null);
+    applySettings(settingsByPath.current.get(path) ?? { backdrop: DEFAULTS, eyes: EYE_DEFAULTS });
+    try {
+      const r = await call<OpenResult>("open", { path });
+      setImage({ ...r, path });
+      setRemovals(r.removals);
+      setMaskEdits(r.mask_edits);
+      saveLastDir(path.replace(/\/[^/]*$/, ""));
+      render();
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
   const openImage = async () => {
     // Start in the last image's folder. Otherwise GTK may open on its "Recent"
     // view, which lists files flat and makes them look as if they've moved.
     const lastDir = image?.path.replace(/\/[^/]*$/, "") ?? readLastDir();
-    const path = await open({
-      multiple: false,
+    const picked = await open({
+      multiple: true,
       defaultPath: lastDir ?? undefined,
       filters: [
         { name: "Images and RAW", extensions: bothCases([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS]) },
@@ -392,21 +454,84 @@ export default function App() {
         { name: "Images", extensions: bothCases(IMAGE_EXTENSIONS) },
       ],
     });
-    if (!path) return;
-    setError(null);
-    setResult(null);
-    setMask(null);
-    setView("result");
-    setRemovals(0);
-    setMaskEdits(0);
-    setFaces(null);
-    try {
-      const r = await call<OpenResult>("open", { path });
-      setImage({ ...r, path });
-      saveLastDir(path.replace(/\/[^/]*$/, ""));
-      render();
-    } catch (e) {
-      handleError(e);
+    const paths = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
+    if (!paths.length) return;
+    const known = new Set(strip.map((i) => i.path));
+    const added = paths.filter((p) => !known.has(p));
+    setStrip((items) => [...items, ...added.map((path) => ({ path, edited: false }))]);
+    const first = added[0] ?? paths[0];
+    setSelected(new Set([first]));
+    if (first !== image?.path) await loadImage(first);
+  };
+
+  // Thumbnails, one at a time so they don't hold up the photo being edited.
+  const loadingThumb = useRef(false);
+  useEffect(() => {
+    const next = strip.find((i) => !i.thumb);
+    if (!next || loadingThumb.current || !engineReady) return;
+    loadingThumb.current = true;
+    call<{ image: string }>("thumbnail", { path: next.path })
+      .then((r) =>
+        setStrip((items) => items.map((i) => (i.path === next.path ? { ...i, thumb: r.image } : i))),
+      )
+      .catch(() =>
+        // Leave a placeholder rather than retrying forever.
+        setStrip((items) => items.map((i) => (i.path === next.path ? { ...i, thumb: "" } : i))),
+      )
+      .finally(() => {
+        loadingThumb.current = false;
+      });
+  }, [strip, engineReady]);
+
+  const removeFromStrip = async (path: string) => {
+    const idx = strip.findIndex((i) => i.path === path);
+    const rest = strip.filter((i) => i.path !== path);
+    setStrip(rest);
+    setSelected((sel) => new Set([...sel].filter((p) => p !== path)));
+    settingsByPath.current.delete(path);
+    if (image?.path === path) {
+      const neighbour = rest[Math.min(idx, rest.length - 1)];
+      if (neighbour) {
+        // Switch first, without keeping this photo's settings; the engine
+        // stashes the photo it's leaving, so forget it only afterwards.
+        await loadImage(neighbour.path, false);
+        setSelected(new Set([neighbour.path]));
+      } else {
+        setImage(null);
+        setResult(null);
+      }
+    }
+    await call("forget", { path }).catch(() => undefined);
+  };
+
+  const copySettings = () => {
+    setCopied(currentSettings());
+    setStatus("Settings copied");
+  };
+
+  const pasteSettings = () => {
+    if (!copied) return;
+    let pasted = 0;
+    for (const path of selected) {
+      if (path === image?.path) {
+        applySettings(copied);
+        render();
+      } else {
+        settingsByPath.current.set(path, copied);
+      }
+      markEdited(path, copied);
+      pasted++;
+    }
+    setStatus(`Settings pasted to ${pasted} photo${pasted === 1 ? "" : "s"}`);
+  };
+
+  const step = (delta: number) => {
+    if (!image || strip.length < 2) return;
+    const idx = strip.findIndex((i) => i.path === image.path);
+    const next = strip[idx + delta];
+    if (next) {
+      setSelected(new Set([next.path]));
+      loadImage(next.path);
     }
   };
 
@@ -585,9 +710,7 @@ export default function App() {
                 e.preventDefault();
                 if (TUTORIAL_VIDEO_URL) openUrl(TUTORIAL_VIDEO_URL);
               }}
-              title={
-                TUTORIAL_VIDEO_URL ? "Watch the tutorial video on YouTube" : "Tutorial video coming soon"
-              }
+              title="Watch the tutorial video on YouTube"
             >
               ▶ New user? Watch this first!
             </a>
@@ -903,6 +1026,31 @@ export default function App() {
         </section>
       </aside>
 
+
+      {strip.length > 0 && (
+        <FilmStrip
+          items={strip.map((i) =>
+            // The photo being edited: its dot follows the sliders live.
+            i.path === image?.path
+              ? {
+                  ...i,
+                  edited: !sameSettings(
+                    { backdrop: params, eyes: eyesParams },
+                    { backdrop: DEFAULTS, eyes: EYE_DEFAULTS },
+                  ),
+                }
+              : i,
+          )}
+          active={image?.path ?? null}
+          selected={selected}
+          canPaste={copied !== null}
+          onActivate={(p) => loadImage(p)}
+          onSelect={setSelected}
+          onRemove={removeFromStrip}
+          onCopy={copySettings}
+          onPaste={pasteSettings}
+        />
+      )}
 
       <footer className="app-footer">
         <span className="oss-note">

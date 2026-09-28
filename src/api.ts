@@ -14,6 +14,8 @@ export interface OpenResult {
   height: number;
   bit_depth: number;
   preview: string; // base64 JPEG
+  removals: number; // restored when switching back to a photo
+  mask_edits: number;
 }
 
 export interface ModelInfo {

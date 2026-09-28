@@ -92,3 +92,44 @@ def save(path: str | Path, rgb: np.ndarray, bit_depth: int, icc: bytes | None) -
     else:
         im = Image.fromarray(np.round(rgb * 255).astype(np.uint8))
         im.save(path, quality=95, icc_profile=icc) if icc else im.save(path, quality=95)
+
+
+def thumbnail(path: str | Path, edge: int = 240) -> Image.Image:
+    """A small, correctly rotated preview for the film strip, fast.
+
+    RAW files use the camera's embedded JPEG (a few ms) rotated by LibRaw's
+    orientation flag, falling back to a quick half-size decode; other files are
+    read and shrunk."""
+    path = Path(path)
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        import io
+
+        import rawpy
+
+        with rawpy.imread(str(path)) as raw:
+            flip = raw.sizes.flip
+            try:
+                th = raw.extract_thumb()
+                if th.format == rawpy.ThumbFormat.JPEG:
+                    im = Image.open(io.BytesIO(th.data)).convert("RGB")
+                else:
+                    im = Image.fromarray(th.data).convert("RGB")
+            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+                im = Image.fromarray(raw.postprocess(half_size=True, use_camera_wb=True))
+                flip = 0  # postprocess already applies the orientation
+        # LibRaw flip: 3 = 180 degrees, 5 = 90 anticlockwise, 6 = 90 clockwise.
+        rotate = {3: Image.Transpose.ROTATE_180, 5: Image.Transpose.ROTATE_90,
+                  6: Image.Transpose.ROTATE_270}.get(flip)
+        if rotate is not None:
+            im = im.transpose(rotate)
+    elif path.suffix.lower() in (".tif", ".tiff"):
+        rgb = load(path).rgb  # 16-bit TIFFs aren't reliably readable by PIL
+        im = Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+    else:
+        from PIL import ImageOps
+
+        with Image.open(path) as src:
+            im = ImageOps.exif_transpose(src).convert("RGB")
+    im.thumbnail((edge, edge))
+    return im
+

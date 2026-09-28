@@ -130,11 +130,12 @@ button.primary {
 .app {
   display: grid;
   grid-template-columns: 1fr 300px;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
   grid-template-areas:
     "title title"
     "toolbar toolbar"
     "viewer sidebar"
+    "strip strip"
     "footer footer";
   height: 100%;
 }
@@ -545,4 +546,119 @@ button.primary {
 
 .video-link__close:hover {
   opacity: 1;
+}
+
+/* Film strip */
+.filmstrip {
+  grid-area: strip;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px 8px;
+  background: #16171c;
+  border-top: 1px solid #26272e;
+  min-width: 0;
+}
+
+.filmstrip__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filmstrip__bar button {
+  padding: 3px 9px;
+  font-size: 11px;
+}
+
+.filmstrip__count {
+  color: #b7b8c2;
+  font-size: 12px;
+  min-width: 70px;
+}
+
+.filmstrip__hint {
+  margin-left: auto;
+  color: #6d6e78;
+  font-size: 11px;
+}
+
+.filmstrip__items {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.filmstrip__item {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 104px;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.filmstrip__item:hover {
+  background: #22232a;
+}
+
+.filmstrip__item--selected {
+  background: #2a2b33;
+}
+
+.filmstrip__item--active {
+  border-color: #ffcc33;
+}
+
+.filmstrip__item img,
+.filmstrip__placeholder {
+  width: 92px;
+  height: 72px;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+
+.filmstrip__placeholder {
+  background: #22232a;
+  border-radius: 3px;
+}
+
+.filmstrip__name {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8d8e99;
+  font-size: 10px;
+}
+
+.filmstrip__edited {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ffcc33;
+  box-shadow: 0 0 0 1px #14151a;
+}
+
+.filmstrip__remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: none;
+  padding: 2px;
+  border-radius: 3px;
+  background: rgba(20, 21, 26, 0.85);
+}
+
+.filmstrip__item:hover .filmstrip__remove {
+  display: inline-flex;
 }
