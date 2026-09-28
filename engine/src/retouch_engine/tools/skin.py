@@ -19,7 +19,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from .colour import linear_to_srgb, srgb_to_linear
-from .eyes import EYES, FACE_OVAL, _poly_mask, _relight
+from .eyes import EYES, FACE_OVAL, _inner_feather, _poly_mask, _relight, _wrinkle_lift
 from .filters import masked_blur
 from .reflection import guided_filter
 
@@ -158,6 +158,70 @@ def face_skin(lab: np.ndarray, lm: np.ndarray, alpha: np.ndarray | None = None):
     return skin.astype(np.float32), hair, model
 
 
+# --- wrinkle zones (Face tab) -------------------------------------------------
+
+BROW_TOPS = [70, 63, 105, 66, 107, 336, 296, 334, 293, 300]  # image-left to right
+FOREHEAD_ARC = [21, 54, 103, 67, 109, 10, 338, 297, 332, 284, 251]  # upper face outline
+BROW_LIFT = 0.03  # forehead zone starts this far above the brows (face widths)
+HAIRLINE_REACH = 0.12  # the outline landmarks stop short of the hairline
+FROWN_HEIGHT = 0.1
+NOSE_WINGS = (129, 358)  # beside each nostril
+MOUTH_CORNERS = (61, 291)
+SMILE_EXTEND = 0.35  # smile-line zone runs this far past the mouth corner
+SMILE_WIDTH = 0.11  # face widths
+SMILE_OUTWARD = 0.03  # the fold sits on the cheek side of the nose-mouth line
+CHIN_DEPTH = 0.22
+CHIN_SPREAD = 0.06
+
+
+def _face_down(lm: np.ndarray) -> np.ndarray:
+    across = lm[454] - lm[234]
+    down = np.array([-across[1], across[0]], np.float32)
+    down /= max(float(np.linalg.norm(down)), 1e-6)
+    return down if np.dot(lm[152] - lm[234], down) > 0 else -down
+
+
+def wrinkle_zones(shape: tuple[int, int], lm: np.ndarray) -> dict[str, np.ndarray]:
+    """Hard masks for each wrinkle slider's area, in the image's pixels."""
+    fw = face_width(lm)
+    down = _face_down(lm)
+    across = (lm[454] - lm[234]) / max(float(np.linalg.norm(lm[454] - lm[234])), 1e-6)
+    up = -down
+
+    frown = np.array(
+        [lm[107] + up * FROWN_HEIGHT * fw, lm[336] + up * FROWN_HEIGHT * fw, lm[336], lm[168],
+         lm[107]],
+        np.float32,
+    )
+    brows = lm[BROW_TOPS] + up * BROW_LIFT * fw
+    forehead = np.concatenate([lm[FOREHEAD_ARC] + up * HAIRLINE_REACH * fw, brows[::-1]])
+
+    smile = np.zeros(shape, np.float32)
+    for wing, corner, side in ((NOSE_WINGS[0], MOUTH_CORNERS[0], -1), (NOSE_WINGS[1], MOUTH_CORNERS[1], 1)):
+        start, end = lm[wing], lm[corner] + (lm[corner] - lm[wing]) * SMILE_EXTEND
+        shift = across * side * SMILE_OUTWARD * fw
+        band = np.zeros(shape, np.uint8)
+        cv2.line(band, tuple(np.round(start + shift).astype(int)), tuple(np.round(end + shift).astype(int)),
+                 1, max(1, round(SMILE_WIDTH * fw)))
+        smile = np.maximum(smile, band.astype(np.float32))
+
+    l, r = lm[MOUTH_CORNERS[0]], lm[MOUTH_CORNERS[1]]
+    chin = np.array(
+        [l - across * CHIN_SPREAD * fw, r + across * CHIN_SPREAD * fw,
+         r + across * CHIN_SPREAD * fw + down * CHIN_DEPTH * fw,
+         l - across * CHIN_SPREAD * fw + down * CHIN_DEPTH * fw],
+        np.float32,
+    )
+    lips = _dilated(_poly_mask(shape, lm[LIPS]), LIP_CLEARANCE * fw)
+    frown_mask = _poly_mask(shape, frown)
+    return {
+        "forehead_lines": _poly_mask(shape, forehead) * (1 - frown_mask),
+        "frown_lines": frown_mask,
+        "smile_lines": smile * (1 - lips),
+        "chin_lines": _poly_mask(shape, chin) * (1 - lips) * (1 - smile),
+    }
+
+
 # --- the Face tools -----------------------------------------------------------
 
 BLEMISH_SCALES = (0.004, 0.007, 0.012, 0.02)  # spot sizes, face widths (pores are smaller)
@@ -182,12 +246,27 @@ EDGE_EPS = 36.0  # (Lab L)^2: contrasts well above ~6 L count as edges
 EDGE_GATE = (10.0, 18.0)
 
 
+# Wrinkle sliders (Face tab): line scales in eye widths (the eye tool's line
+# filler is reused, and a face is ~5 eye widths across), and how much of a
+# deep fold is kept even at full strength.
+WRINKLE_AREAS = {
+    "forehead_lines": ((0.012, 0.022, 0.035), 0.2),
+    "frown_lines": ((0.012, 0.02, 0.03), 0.25),
+    "smile_lines": ((0.02, 0.035, 0.05), 0.5),  # never erased: looks unnatural
+    "chin_lines": ((0.015, 0.025, 0.04), 0.35),
+}
+
+
 @dataclass
 class RegionParams:
     blemishes: float = 0.0
     smooth: float = 0.0
     even: float = 0.0
     shine: float = 0.0  # -1 matte .. 0 natural .. +1 gloss
+    forehead_lines: float = 0.0  # the wrinkle sliders exist on the Face tab only
+    frown_lines: float = 0.0
+    smile_lines: float = 0.0
+    chin_lines: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "RegionParams":
@@ -195,7 +274,10 @@ class RegionParams:
         return cls(**{k: float(v) for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def is_noop(self) -> bool:
-        return self.blemishes <= 0 and self.smooth <= 0 and self.even <= 0 and self.shine == 0
+        return self.shine == 0 and all(
+            getattr(self, k) <= 0
+            for k in ("blemishes", "smooth", "even", *WRINKLE_AREAS)
+        )
 
 
 def _blobs(channel: np.ndarray, fw: float) -> np.ndarray:
@@ -299,8 +381,22 @@ def _shine(lab, W, fw, amount, eye_w):
         lab[..., 1:] *= (1 - 0.3 * amount * shine)[..., None]
 
 
-def _apply_region(lab, W, fw, p: RegionParams, model):
+def _smooth_lines(lab, W, lm, fw, p: RegionParams, eye_w):
+    """The Wrinkles group: fill creases in each area, pores kept, folds softened."""
+    zones = wrinkle_zones(lab.shape[:2], lm)
+    for name, (scales, fold_keep) in WRINKLE_AREAS.items():
+        amount = getattr(p, name)
+        if amount <= 0:
+            continue
+        zone = _inner_feather(zones[name], 0.03 * fw) * W
+        L = np.ascontiguousarray(lab[..., 0])
+        _relight(lab, amount * _wrinkle_lift(L, zone, eye_w, scales, fold_keep), eye_w)
+
+
+def _apply_region(lab, W, fw, p: RegionParams, model, lm=None):
     eye_w = 0.2 * fw  # the eye tools' colour-matching scale, in this face's units
+    if lm is not None:  # wrinkles first, while the fine detail is as shot
+        _smooth_lines(lab, W, lm, fw, p, eye_w)
     if p.blemishes > 0:
         _heal_blemishes(lab, W, fw, p.blemishes)
     if p.even > 0:
@@ -331,6 +427,6 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], face_params: dict | None) ->
         lab = cv2.cvtColor(crop, cv2.COLOR_RGB2Lab)
         skin_w, hair, model = face_skin(lab, lm - [x0, y0])
         W = cv2.GaussianBlur(skin_w * (1 - hair), (0, 0), max(0.7, 0.004 * fw))
-        _apply_region(lab, W, fw, p, model)
+        _apply_region(lab, W, fw, p, model, lm - [x0, y0])
         out[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
     return out

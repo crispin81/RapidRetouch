@@ -54,6 +54,11 @@ export interface SkinRegion {
   smooth: number;
   even: number;
   shine: number; // -1 matte .. 0 natural .. +1 gloss
+  // Wrinkles group (Face tab only)
+  forehead_lines: number;
+  frown_lines: number;
+  smile_lines: number;
+  chin_lines: number;
 }
 
 export interface SkinParams {

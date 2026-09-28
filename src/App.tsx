@@ -141,7 +141,26 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
 type View = "result" | "before" | "mask" | "compare";
 type Step = "removals" | "backdrop" | "skin" | "eyes";
 
-const SKIN_REGION_DEFAULTS: SkinRegion = { blemishes: 0, smooth: 0, even: 0, shine: 0 };
+const SKIN_REGION_DEFAULTS: SkinRegion = {
+  blemishes: 0,
+  smooth: 0,
+  even: 0,
+  shine: 0,
+  forehead_lines: 0,
+  frown_lines: 0,
+  smile_lines: 0,
+  chin_lines: 0,
+};
+const WRINKLE_SLIDERS: { key: keyof SkinRegion; label: string; hint: string }[] = [
+  { key: "forehead_lines", label: "Forehead lines", hint: "Soften horizontal lines across the forehead" },
+  { key: "frown_lines", label: "Frown lines", hint: "Soften the vertical lines between the brows" },
+  {
+    key: "smile_lines",
+    label: "Smile lines",
+    hint: "Soften the folds from nose to mouth; even at 1 some fold is kept, as removing it looks unnatural",
+  },
+  { key: "chin_lines", label: "Chin lines", hint: "Soften lines around the chin and below the mouth corners" },
+];
 const SKIN_DEFAULTS: SkinParams = {
   face: SKIN_REGION_DEFAULTS,
   neck: SKIN_REGION_DEFAULTS,
@@ -1181,6 +1200,25 @@ export default function App() {
               onChange={(v) => updateSkin(skinTab, s.key, v)}
             />
           ))}
+          {skinTab === "face" && (
+            <>
+              <h3 className="panel__subhead">Wrinkles</h3>
+              {WRINKLE_SLIDERS.map((s) => (
+                <Slider
+                  key={s.key}
+                  label={s.label}
+                  hint={s.hint}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={skinParams.face[s.key]}
+                  defaultValue={0}
+                  disabled={!image}
+                  onChange={(v) => updateSkin("face", s.key, v)}
+                />
+              ))}
+            </>
+          )}
           <div className="panel__buttons">
             <button
               disabled={
@@ -1197,8 +1235,8 @@ export default function App() {
             </button>
           </div>
           <p className="panel__model">
-            Facial hair, eyes, brows and lips are left alone automatically. Neck and Body are coming
-            next.
+            Facial hair, eyes, brows and lips are left alone automatically. Eye wrinkles and crow's
+            feet are in the Eyes panel. Neck and Body are coming next.
           </p>
         </section>
 
