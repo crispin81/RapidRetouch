@@ -847,7 +847,7 @@ button.primary {
   top: 0;
   z-index: 2;
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   padding: 6px 10px;
   background: #1b1c22;
   border-bottom: 1px solid #26272e;
@@ -884,4 +884,125 @@ button.primary {
 .before-after button {
   padding: 4px 12px;
   font-size: 12px;
+}
+
+/* Presets menu (sidebar bar) */
+.presets {
+  position: relative;
+}
+
+.presets__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  width: 260px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #1f2027;
+  border: 1px solid #3a3b45;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.presets__note,
+.presets__empty {
+  margin: 0;
+  font-size: 11px;
+  color: #8d8e99;
+}
+
+.presets__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.presets__list li {
+  display: flex;
+  gap: 4px;
+}
+
+.presets__apply {
+  flex: 1;
+  justify-content: flex-start;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  background: none;
+  border-color: transparent;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presets__apply:hover:not(:disabled) {
+  background: #2a2b33;
+}
+
+.presets__delete {
+  padding: 4px 6px;
+  background: none;
+  border-color: transparent;
+  color: #8d8e99;
+  font-size: 11px;
+}
+
+.presets__delete--confirm {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}
+
+.presets__save {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #2f3039;
+}
+
+.presets__save input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  color: #e8e8ea;
+  background: #16171d;
+  border: 1px solid #3a3b45;
+  border-radius: 6px;
+}
+
+.presets__save input:focus {
+  outline: none;
+  border-color: #ffcc33;
+}
+
+.presets__save button {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.presets__button {
+  font-size: 13px;
+  color: #e8e8ea;
+}
+
+.presets__button svg {
+  color: #ffcc33;
+}
+
+.presets__apply {
+  font-size: 13.5px;
+}
+
+/* Open (gold button): the icon goes dark so it doesn't vanish into the gold. */
+.presets__button.active,
+.presets__button.active svg {
+  color: #16171d;
 }

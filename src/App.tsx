@@ -39,6 +39,7 @@ import {
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
 import CurveEditor, { IDENTITY, Point } from "./CurveEditor";
+import PresetMenu, { Preset } from "./PresetMenu";
 import Slider from "./Slider";
 import Viewer, { Detail, ViewerHandle } from "./Viewer";
 import TitleBar from "./TitleBar";
@@ -238,6 +239,32 @@ const ALL_DEFAULTS: PhotoSettings = {
   creases: 0,
   tone: TONE_DEFAULTS,
 };
+/** A preset's settings as full PhotoSettings: anything the preset doesn't have
+ * (a slider added since it was saved) takes its default. */
+function withPreset(saved: Record<string, unknown>, outdoor: boolean): PhotoSettings {
+  const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+  const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
+  const skin = obj(saved.skin);
+  const tone = obj(saved.tone);
+  return {
+    backdrop: { ...ALL_DEFAULTS.backdrop, ...obj(saved.backdrop) },
+    outdoor,
+    eyes: { ...ALL_DEFAULTS.eyes, ...obj(saved.eyes) },
+    skin: {
+      face: { ...ALL_DEFAULTS.skin.face, ...obj(skin.face) },
+      neck: { ...ALL_DEFAULTS.skin.neck, ...obj(skin.neck) },
+      body: { ...ALL_DEFAULTS.skin.body, ...obj(skin.body) },
+    },
+    mouth: { ...ALL_DEFAULTS.mouth, ...obj(saved.mouth) },
+    dodgeBurn: num(saved.dodgeBurn, 0),
+    creases: num(saved.creases, 0),
+    tone: {
+      ev: num(tone.ev, 0),
+      curve: Array.isArray(tone.curve) ? (tone.curve as Point[]) : IDENTITY,
+    },
+  };
+}
+
 const SKIN_TABS: { key: SkinTab; label: string; ready: boolean }[] = [
   { key: "face", label: "Face", ready: true },
   { key: "neck", label: "Neck", ready: false },
@@ -443,6 +470,7 @@ export default function App() {
   const [strip, setStrip] = useState<StripItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<PhotoSettings | null>(null);
+  const [presets, setPresets] = useState<Preset[]>([]);
   const settingsByPath = useRef(new Map<string, PhotoSettings>());
   const [tutorialDismissed, setTutorialDismissed] = useState(() => {
     try {
@@ -507,6 +535,7 @@ export default function App() {
     call<{ device: string; cuda: boolean }>("ping")
       .then((r) => {
         setEngineReady(true);
+        call<Preset[]>("presets").then(setPresets).catch(() => undefined);
         setStatus(r.cuda ? `Ready · ${r.device}` : "Ready · no GPU found, running on CPU (slow)");
       })
       .catch((e) => setError(`The engine didn't start: ${errorMessage(e)}`));
@@ -1000,6 +1029,48 @@ export default function App() {
     setStatus(`Settings pasted to ${pasted} photo${pasted === 1 ? "" : "s"}`);
   };
 
+  // Presets: every slider setting, but not the Backdrop/Outdoor mode (each
+  // photo keeps the one detected or chosen for it) and not brush work, which
+  // belongs to the photo it was painted on. They apply to the film-strip
+  // selection, like paste.
+  const presetTargets = (): string[] => {
+    const paths = [...selected].filter((p) => strip.some((i) => i.path === p));
+    return paths.length ? paths : image ? [image.path] : [];
+  };
+  const savePreset = async (name: string) => {
+    const { outdoor: _mode, ...settings } = currentSettings();
+    try {
+      setPresets(await call<Preset[]>("save_preset", { name, settings }));
+      setStatus(`Saved preset "${name}"`);
+    } catch (e) {
+      handleError(e);
+    }
+  };
+  const deletePreset = async (name: string) => {
+    try {
+      setPresets(await call<Preset[]>("delete_preset", { name }));
+      setStatus(`Deleted preset "${name}"`);
+    } catch (e) {
+      handleError(e);
+    }
+  };
+  const applyPreset = (preset: Preset) => {
+    const targets = presetTargets();
+    for (const path of targets) {
+      const current =
+        path === image?.path ? currentSettings() : (settingsByPath.current.get(path) ?? ALL_DEFAULTS);
+      const st = withPreset(preset.settings, current.outdoor);
+      if (path === image?.path) {
+        applySettings(st);
+        render();
+      } else {
+        settingsByPath.current.set(path, st);
+      }
+      markEdited(path, st);
+    }
+    setStatus(`Applied "${preset.name}" to ${targets.length} photo${targets.length === 1 ? "" : "s"}`);
+  };
+
   const step = (delta: number) => {
     if (!image || strip.length < 2) return;
     const idx = strip.findIndex((i) => i.path === image.path);
@@ -1380,6 +1451,14 @@ export default function App() {
 
       <aside className="sidebar">
         <div className="sidebar__bar">
+          <PresetMenu
+            presets={presets}
+            disabled={!engineReady || !image}
+            targets={presetTargets().length}
+            onApply={applyPreset}
+            onSave={savePreset}
+            onDelete={deletePreset}
+          />
           <button
             className="sidebar__fold"
             onClick={toggleAllPanels}

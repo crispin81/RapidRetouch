@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import imageio
+from . import imageio, presets
 from .registry import LicenceNotAccepted, Registry
 from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, scene, tone
 from .tools import eyes as eye_tool
@@ -46,6 +46,9 @@ METHODS = {
     "undo_remove",
     "clear_removals",
     "render_region",
+    "presets",
+    "save_preset",
+    "delete_preset",
     "export",
 }
 
@@ -200,6 +203,17 @@ class Engine:
             "height": h,
             "scene": guess["mode"],
         }
+
+    def presets(self) -> list[dict]:
+        return presets.list_all()
+
+    def save_preset(self, name: str, settings: dict) -> list[dict]:
+        presets.save(name, settings)
+        return presets.list_all()
+
+    def delete_preset(self, name: str) -> list[dict]:
+        presets.delete(name)
+        return presets.list_all()
 
     def forget(self, path: str) -> dict:
         """Drop the stored edits of a photo taken out of the film strip."""
