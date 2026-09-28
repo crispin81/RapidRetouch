@@ -584,9 +584,10 @@ export default function App() {
               onClick={(e) => {
                 e.preventDefault();
                 if (TUTORIAL_VIDEO_URL) openUrl(TUTORIAL_VIDEO_URL);
-                else setStatus("Tutorial video coming soon");
               }}
-              title="Watch the tutorial video on YouTube"
+              title={
+                TUTORIAL_VIDEO_URL ? "Watch the tutorial video on YouTube" : "Tutorial video coming soon"
+              }
             >
               ▶ New user? Watch this first!
             </a>
@@ -902,22 +903,22 @@ export default function App() {
         </section>
       </aside>
 
-      <footer className="statusbar">
-        {error ? (
-          <span className="statusbar__error" onClick={() => setError(null)}>
-            {error}
-          </span>
-        ) : (
-          <span>
-            {busy && <span className="spinner" />} {status}
-          </span>
-        )}
-      </footer>
 
       <footer className="app-footer">
         <span className="oss-note">
           RapidRetouch is free and open-source software, licensed AGPL-3.0. Developed and maintained
           by Chris Cork Photography.
+        </span>
+        <span className="app-footer__status">
+          {error ? (
+            <span className="statusbar__error" onClick={() => setError(null)} title="Click to dismiss">
+              {error}
+            </span>
+          ) : (
+            <span>
+              {busy && <span className="spinner" />} {status}
+            </span>
+          )}
         </span>
         <a
           className="coffee-link"
