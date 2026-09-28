@@ -722,6 +722,16 @@ button.primary {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.panel__head h2 {
+  margin-right: auto;
+}
+
+.panel__toggle {
+  padding: 3px 9px;
+  font-size: 11px;
 }
 
 .reset-button {

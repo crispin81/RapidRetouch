@@ -17,6 +17,7 @@ import {
   Smile,
   Glasses,
   RotateCcw,
+  Sun,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -38,6 +39,7 @@ import FilmStrip, { StripItem } from "./FilmStrip";
 
 interface PhotoSettings {
   backdrop: BackdropParams;
+  outdoor: boolean; // no backdrop step: for portraits not shot on a backdrop
   eyes: EyesParams;
   skin: SkinParams;
 }
@@ -168,7 +170,12 @@ const SKIN_DEFAULTS: SkinParams = {
   body: SKIN_REGION_DEFAULTS,
 };
 type SkinTab = keyof SkinParams;
-const ALL_DEFAULTS = { backdrop: DEFAULTS, eyes: EYE_DEFAULTS, skin: SKIN_DEFAULTS };
+const ALL_DEFAULTS: PhotoSettings = {
+  backdrop: DEFAULTS,
+  outdoor: false,
+  eyes: EYE_DEFAULTS,
+  skin: SKIN_DEFAULTS,
+};
 const SKIN_TABS: { key: SkinTab; label: string; ready: boolean }[] = [
   { key: "face", label: "Face", ready: true },
   { key: "neck", label: "Neck", ready: false },
@@ -315,6 +322,10 @@ export default function App() {
   const paramsRef = useRef(params);
   const eyesRef = useRef(eyesParams);
   const skinRef = useRef(skinParams);
+  const [outdoor, setOutdoor] = useState(false);
+  const outdoorRef = useRef(outdoor);
+  /** Backdrop settings to send: none when the photo is set to Outdoor. */
+  const backdropArg = () => (outdoorRef.current ? null : paramsRef.current);
   const inFlight = useRef(false);
   const dirty = useRef(false);
 
@@ -422,7 +433,7 @@ export default function App() {
         dirty.current = false;
         const forPath = openedPath.current;
         const r = await call<{ preview: string; faces: number | null }>("render", {
-          backdrop: paramsRef.current,
+          backdrop: backdropArg(),
           eyes: eyesRef.current,
           skin: skinRef.current,
         });
@@ -455,6 +466,14 @@ export default function App() {
   };
 
   // Reset buttons beside each group's heading.
+  const toggleOutdoor = () => {
+    const next = !outdoorRef.current;
+    outdoorRef.current = next;
+    setOutdoor(next);
+    if (next && view === "mask") setView("result");
+    render();
+  };
+
   const resetBackdrop = () => {
     paramsRef.current = DEFAULTS;
     setParams(DEFAULTS);
@@ -495,7 +514,7 @@ export default function App() {
         if (!(await ensureOpen())) return;
         const r = await call<{ preview: string; removals: number }>(method, {
           ...extra,
-          backdrop: paramsRef.current,
+          backdrop: backdropArg(),
           eyes: eyesRef.current,
           skin: skinRef.current,
         });
@@ -574,12 +593,15 @@ export default function App() {
 
   const currentSettings = (): PhotoSettings => ({
     backdrop: paramsRef.current,
+    outdoor: outdoorRef.current,
     eyes: eyesRef.current,
     skin: skinRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
     paramsRef.current = st.backdrop;
+    outdoorRef.current = st.outdoor;
+    setOutdoor(st.outdoor);
     eyesRef.current = st.eyes;
     skinRef.current = st.skin;
     setSkinParams(st.skin);
@@ -793,7 +815,7 @@ export default function App() {
     try {
       if (!(await ensureOpen())) return;
       const r = await call<{ preview: string }>("render", {
-        backdrop: step === "backdrop" ? null : paramsRef.current,
+        backdrop: step === "backdrop" ? null : backdropArg(),
         eyes: step === "eyes" ? null : eyesRef.current,
         skin: step === "skin" ? null : skinRef.current,
         removals: step !== "removals",
@@ -816,7 +838,7 @@ export default function App() {
     if (view === "mask") return null;
     if (view === "before") return { backdrop: null, eyes: null, removals: false };
     const all = {
-      backdrop: paramsRef.current,
+      backdrop: backdropArg(),
       eyes: eyesRef.current,
       skin: skinRef.current,
       removals: true,
@@ -893,7 +915,7 @@ export default function App() {
     try {
       const r = await call<{ path: string }>("export", {
         path,
-        backdrop: paramsRef.current,
+        backdrop: backdropArg(),
         eyes: eyesRef.current,
         skin: skinRef.current,
       });
@@ -1128,6 +1150,14 @@ export default function App() {
         <section className="panel">
           <div className="panel__head">
             <h2>Backdrop</h2>
+            <button
+              className={`panel__toggle ${outdoor ? "active" : ""}`}
+              disabled={!image}
+              onClick={toggleOutdoor}
+              title="Outdoor: turn the backdrop step off, for portraits not shot on a backdrop"
+            >
+              <Sun size={13} /> Outdoor
+            </button>
             <ResetButton
               disabled={!image || sameValues(params, DEFAULTS)}
               onClick={resetBackdrop}
@@ -1144,14 +1174,14 @@ export default function App() {
               step={s.step}
               value={params[s.key]}
               defaultValue={DEFAULTS[s.key]}
+              disabled={!image || outdoor}
               format={s.format}
-              disabled={!image}
               onChange={(v) => updateParam(s.key, v)}
             />
           ))}
           <div className="panel__buttons">
             <button
-              disabled={!image || view === "mask"}
+              disabled={!image || view === "mask" || outdoor}
               onPointerDown={() => holdWithout("backdrop")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
@@ -1159,7 +1189,11 @@ export default function App() {
             >
               <Eye size={15} /> Hold for before
             </button>
-            <button disabled={!image} onClick={showMask} className={view === "mask" ? "active" : ""}>
+            <button
+              disabled={!image || outdoor}
+              onClick={showMask}
+              className={view === "mask" ? "active" : ""}
+            >
               <Layers size={15} /> Mask
             </button>
           </div>
@@ -1212,10 +1246,16 @@ export default function App() {
               </p>
             </>
           )}
-          {maskModel && (
+          {outdoor ? (
             <p className="panel__model">
-              Subject mask: {maskModel.name} · {maskModel.licence}
+              Outdoor: the backdrop step is off for this photo. Removals, skin and eyes still work.
             </p>
+          ) : (
+            maskModel && (
+              <p className="panel__model">
+                Subject mask: {maskModel.name} · {maskModel.licence}
+              </p>
+            )
           )}
         </section>
 
@@ -1363,7 +1403,7 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, eyes: eyesParams, skin: skinParams },
+                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams },
                     ALL_DEFAULTS,
                   ),
                 }
