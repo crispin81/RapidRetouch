@@ -65,7 +65,15 @@ const SLIDERS: {
 ];
 
 // Off until asked for: faces aren't changed unless the photographer chooses to.
-const EYE_DEFAULTS: EyesParams = { dark_circles: 0, eye_bags: 0, wrinkles: 0 };
+const EYE_DEFAULTS: EyesParams = {
+  dark_circles: 0,
+  eye_bags: 0,
+  wrinkles: 0,
+  whites: 0,
+  iris: 0,
+  catchlight: 0,
+  veins: 0,
+};
 
 const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
   {
@@ -82,6 +90,26 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
     key: "wrinkles",
     label: "Wrinkles",
     hint: "Soften fine lines under the eyes and crow's feet; pores and skin texture are kept",
+  },
+  {
+    key: "whites",
+    label: "Eye whites",
+    hint: "Clear redness, yellowing and veins from the whites; lashes and the inner corner are left alone",
+  },
+  {
+    key: "veins",
+    label: "Eye veins",
+    hint: "Remove red veins from the whites; each takes the colour of the clean white beside it",
+  },
+  {
+    key: "iris",
+    label: "Iris",
+    hint: "Bring out iris detail and colour; the pupil and the dark outer ring are kept",
+  },
+  {
+    key: "catchlight",
+    label: "Catch light",
+    hint: "Brighten and crisp up the existing catchlights (none are added)",
   },
 ];
 

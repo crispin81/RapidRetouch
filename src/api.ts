@@ -41,6 +41,10 @@ export interface EyesParams {
   dark_circles: number;
   eye_bags: number;
   wrinkles: number;
+  whites: number;
+  iris: number;
+  catchlight: number;
+  veins: number;
 }
 
 export type EngineEvent =

@@ -19,6 +19,10 @@ the skin around them (a morphological closing: the skin as if the line weren't
 there). Anything much darker than a wrinkle (lashes, brow tails, stray hairs)
 is left alone, and the zones are clipped to the face outline.
 
+The eyes themselves (whites, iris, catchlights) use MediaPipe's iris landmarks
+(centre + 4 edge points): the eye opening comes from the lid contour, the iris is
+a circle clipped by the lids, the pupil its dark core, the white the rest.
+
 Eye bags: frequency-separated dodge and burn. Light and shade at "bag" scale
 (bigger than pores and fine lines, smaller than the face's lighting) is
 flattened — the crease shadow lifted more than the bulge's highlight is toned
@@ -44,12 +48,14 @@ EYES = {
         "lid": [33, 7, 163, 144, 145, 153, 154, 155, 133],
         "contour": [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
         "brow": [70, 63, 105, 66, 107, 55, 65, 52, 53, 46],
+        "iris": 468,  # centre; 469-472 are points on its edge
     },
     "left": {
         "corners": (263, 362),
         "lid": [263, 249, 390, 373, 374, 380, 381, 382, 362],
         "contour": [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466],
         "brow": [300, 293, 334, 296, 336, 285, 295, 282, 283, 276],
+        "iris": 473,
     },
 }
 
@@ -108,6 +114,26 @@ CREASE_TOP = 0.12
 CREASE_FEATHER = 0.06
 CREASE_FOLD_KEEP = 0.15  # removing this line is the point, so little is kept
 
+# Eye whites, iris and catchlights. Distances in eye widths, lightness in Lab L.
+LID_MARGIN = 0.03  # stay this far inside the lids (lashes, lid shadow)
+CARUNCLE_CLEAR = (0.06, 0.14)  # fade out toward the pink inner corner
+WHITES_DESATURATE = 0.6  # share of the whites' colour cast removed at full
+WHITES_TARGET_L = 92.0
+WHITES_MAX_LIFT = 12.0
+VEIN_SCALES = (0.006, 0.012)  # vein half-widths the detector looks for
+VEIN_LOW, VEIN_HIGH = 0.4, 1.5  # redness-line strength ramp (Lab a units)
+VEIN_MIN_RED = (2.0, 6.0)  # how much redder than the white around it
+VEIN_REFERENCE = 0.05  # neighbourhood the clean white is taken from
+IRIS_EDGE_KEEP = 0.8  # outer part of the iris (the dark limbal ring) is kept
+IRIS_DETAIL = (0.012, 0.08)  # fibre band: finer is noise, coarser is shading
+IRIS_DETAIL_GAIN = 0.8
+IRIS_DETAIL_CLIP = 6.0  # Lab L
+IRIS_SATURATION = 0.6
+IRIS_MAX_LIFT = 8.0
+CATCH_SIGMA = 0.08  # surroundings a catchlight stands out from
+CATCH_EXCESS = (8.0, 25.0)  # how much brighter than surroundings to count
+CATCH_BOOST = 0.8
+
 MAX_LIFT = 20.0  # Lab L units
 MAX_COLOUR_SHIFT = 15.0  # Lab a/b units
 BAG_MAX = 0.85  # full slider still leaves a little shape; 100% looks unnatural
@@ -121,13 +147,28 @@ class Params:
     dark_circles: float = 0.5
     eye_bags: float = 0.4
     wrinkles: float = 0.0
+    whites: float = 0.0
+    iris: float = 0.0
+    catchlight: float = 0.0
+    veins: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict) -> "Params":
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def is_noop(self) -> bool:
-        return self.dark_circles <= 0 and self.eye_bags <= 0 and self.wrinkles <= 0
+        return all(
+            v <= 0
+            for v in (
+                self.dark_circles,
+                self.eye_bags,
+                self.wrinkles,
+                self.whites,
+                self.iris,
+                self.catchlight,
+                self.veins,
+            )
+        )
 
 
 def _resample(pts: np.ndarray, n: int = CURVE_POINTS) -> np.ndarray:
@@ -203,6 +244,11 @@ def _eye_geometry(lm: np.ndarray, spec: dict):
         "face": lm[FACE_OVAL],
         "contour": lm[spec["contour"]],
         "brow": lm[spec["brow"]],
+        "iris_centre": lm[spec["iris"]],
+        "iris_radius": float(
+            np.linalg.norm(lm[spec["iris"] + 1 : spec["iris"] + 5] - lm[spec["iris"]], axis=1).mean()
+        ),
+        "inner_corner": inner,
     }
 
 
@@ -310,6 +356,117 @@ def _relight(lab: np.ndarray, dL: np.ndarray, eye_w: float) -> None:
     lab[..., 1:] += t[..., None] * (around - lab[..., 1:])
 
 
+def _pupil_radius(L: np.ndarray, d: np.ndarray, r: float, opening: np.ndarray) -> float:
+    """Pupil radius from the brightness profile outward from the iris centre.
+
+    Thresholding "dark pixels" fails on dark eyes, where most of the iris is as
+    dark as the pupil: the pupil swallows the iris and only an outer ring gets
+    enhanced. Instead find where the profile climbs halfway from the pupil to
+    the iris; if they're too alike to tell apart, assume a typical size."""
+    rings = []
+    for k in range(17):  # 0 .. 0.8 r in steps of 0.05 r
+        band = (d >= k * 0.05 * r) & (d < (k + 1) * 0.05 * r) & (opening > 0)
+        rings.append(float(np.median(L[band])) if band.sum() >= 3 else np.nan)
+    prof = np.array(rings)
+    if np.isnan(prof[:8]).all() or np.isnan(prof[12:]).all():
+        return 0.35 * r
+    dark = float(np.nanmin(prof[:8]))
+    iris_level = float(np.nanmedian(prof[12:]))
+    if iris_level - dark < 6.0:
+        return 0.35 * r
+    half = dark + 0.5 * (iris_level - dark)
+    for k, v in enumerate(prof):
+        if not np.isnan(v) and v > half and k * 0.05 * r > 0.1 * r:
+            return float(np.clip(k * 0.05 * r, 0.15 * r, 0.6 * r))
+    return 0.35 * r
+
+
+def _remove_veins(lab: np.ndarray, sclera: np.ndarray, eye_w: float, amount: float) -> None:
+    """Blood vessels in the white of the eye: thin lines redder than the white
+    around them. The line detector runs on redness (Lab a), so the iris edge,
+    lash shadows and the white's own shading don't count; each vein pixel then
+    takes the colour and brightness of the clean white beside it (measured
+    with the veins left out), so it vanishes rather than becoming a pale line."""
+    a = np.ascontiguousarray(lab[..., 1])
+    hard = (sclera > 0.05).astype(np.float32)
+    # A red ridge in a is a dark valley in -a: reuse the wrinkle line detector.
+    line = _smoothstep(_line_strength(-a, eye_w, VEIN_SCALES), VEIN_LOW, VEIN_HIGH)
+    local_a = masked_blur(a, hard, max(0.7, VEIN_REFERENCE * eye_w))
+    redder = _smoothstep(a - local_a, *VEIN_MIN_RED)
+    vein = line * redder * hard
+    k = 2 * round(max(1.0, VEIN_SCALES[-1] * eye_w)) + 1
+    vein = cv2.dilate(vein, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    vein = np.clip(cv2.GaussianBlur(vein, (0, 0), max(0.5, VEIN_SCALES[0] * eye_w)), 0, 1)
+    clean = masked_blur(lab, hard * (1 - vein) ** 2, max(0.7, VEIN_REFERENCE * eye_w))
+    target = clean - lab
+    target[..., 0] = np.clip(target[..., 0], 0, None)  # only ever brighten
+    lab += (amount * vein * sclera)[..., None] * target
+
+
+def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Params) -> None:
+    """Whites, iris and catchlights, in place on the eye crop's Lab."""
+    shape = lab.shape[:2]
+    L = lab[..., 0].copy()
+    opening_hard = _poly_mask(shape, geo["contour"] - off)
+    opening = _inner_feather(opening_hard, LID_MARGIN * eye_w)
+
+    yy, xx = np.mgrid[0 : shape[0], 0 : shape[1]].astype(np.float32)
+    cx, cy = geo["iris_centre"] - off
+    r = geo["iris_radius"]
+    d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    iris_disk = np.clip((r - d) / max(0.5, 0.06 * r) + 0.5, 0, 1)
+
+    # Catchlights first, from the untouched pixels: small spots much brighter
+    # than their surroundings. They're shielded from the whites/iris edits.
+    around = cv2.GaussianBlur(L, (0, 0), max(0.7, CATCH_SIGMA * eye_w))
+    excess = L - around
+    catch = (
+        _smoothstep(excess, *CATCH_EXCESS)
+        * _smoothstep(L, 55.0, 80.0)
+        * cv2.dilate(opening_hard, np.ones((3, 3), np.uint8))
+    )
+    catch = np.clip(cv2.GaussianBlur(catch, (0, 0), max(0.5, 0.01 * eye_w)) * 1.5, 0, 1)
+
+    # The white of the eye: the opening minus the iris and the pink inner corner.
+    ic = geo["inner_corner"] - off
+    from_inner = np.sqrt((xx - ic[0]) ** 2 + (yy - ic[1]) ** 2) / eye_w
+    sclera_ring = np.clip((d - 1.08 * r) / max(0.5, 0.1 * r) + 0.5, 0, 1)
+    sclera = opening * sclera_ring * _smoothstep(from_inner, *CARUNCLE_CLEAR) * (1 - catch)
+
+    if p.veins > 0:
+        _remove_veins(lab, sclera, eye_w, p.veins)
+
+    if p.whites > 0:
+        s = p.whites * sclera
+        Lw = lab[..., 0].copy()
+        lab[..., 1:] *= (1 - WHITES_DESATURATE * s)[..., None]
+        lift = np.clip((WHITES_TARGET_L - Lw) * 0.25, 0, WHITES_MAX_LIFT)
+        lab[..., 0] += s * _smoothstep(Lw, 35.0, 65.0) * lift  # not lashes or shadow
+
+    if p.iris > 0:
+        pupil_r = _pupil_radius(L, d, r, opening_hard)
+        pupil = np.clip((pupil_r - d) / max(0.5, 0.08 * r) + 0.5, 0, 1)
+        inner_iris = np.clip((IRIS_EDGE_KEEP * r - d) / max(0.5, 0.1 * r) + 0.5, 0, 1)
+        W = iris_disk * inner_iris * opening * (1 - pupil) * (1 - catch)
+        s = p.iris * W
+        fine = cv2.GaussianBlur(L, (0, 0), max(0.5, IRIS_DETAIL[0] * eye_w))
+        coarse = cv2.GaussianBlur(L, (0, 0), max(0.7, IRIS_DETAIL[1] * eye_w))
+        # Detail clipped: a strong edge (iris against the white) must never turn
+        # into a bright ring, whatever the landmarks say.
+        detail = np.clip(fine - coarse, -IRIS_DETAIL_CLIP, IRIS_DETAIL_CLIP)
+        # A fixed lift is a huge relative change on a near-black iris in shadow.
+        lift = np.clip((70.0 - L) * 0.15, 0, IRIS_MAX_LIFT) * _smoothstep(L, 10.0, 35.0)
+        lab[..., 0] += s * (IRIS_DETAIL_GAIN * detail + lift)
+        lab[..., 1:] *= (1 + IRIS_SATURATION * s)[..., None]
+
+    if p.catchlight > 0:
+        s = p.catchlight * catch
+        lab[..., 0] += s * np.minimum(CATCH_BOOST * np.clip(excess, 0, None), 100.0 - lab[..., 0])
+        lab[..., 1:] *= (1 - 0.5 * s)[..., None]  # crisp, neutral highlights
+
+    lab[..., 0] = np.clip(lab[..., 0], 0, 100)
+
+
 def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
     """Edit one eye's surroundings of ``rgb`` in place."""
     h, w = rgb.shape[:2]
@@ -388,6 +545,9 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
         adjust = np.where(mid < 0, -mid, -BURN_RATIO * mid)
         soft = _inner_feather(zone, FEATHER * eye_w)
         _relight(lab, p.eye_bags * BAG_MAX * soft * adjust, eye_w)
+
+    if p.whites > 0 or p.iris > 0 or p.catchlight > 0:
+        _eye_itself(lab, geo, off, eye_w, p)
 
     rgb[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
 
