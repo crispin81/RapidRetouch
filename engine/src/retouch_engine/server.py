@@ -24,7 +24,7 @@ from PIL import Image
 
 from . import imageio
 from .registry import LicenceNotAccepted, Registry
-from .tools import backdrop_smooth, inpaint, mask_edit, reflection, scene
+from .tools import backdrop_smooth, dodge_burn, inpaint, mask_edit, patch, reflection, scene
 from .tools import eyes as eye_tool
 from .tools import skin as skin_tool
 
@@ -44,6 +44,9 @@ METHODS = {
     "remove",
     "undo_remove",
     "clear_removals",
+    "light_paint",
+    "undo_light",
+    "clear_light",
     "render_region",
     "export",
 }
@@ -101,6 +104,10 @@ class Engine:
         # Edits of photos in the film strip that aren't open right now, by path.
         # Only the edit lists are kept (cheap); pixels are recomputed on return.
         self.sessions: dict[str, dict] = {}
+        # Dodge & burn strokes, applied last, and the preview's exposure map for
+        # them (keyed by the strokes, so other sliders never recompute it).
+        self.light_strokes: list[dict] = []
+        self._light_map: tuple[str, np.ndarray] | None = None
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
@@ -142,6 +149,7 @@ class Engine:
                 "strokes": self.strokes,
                 "mask_edits": self.mask_edits,
                 "faces": self.faces,
+                "light_strokes": self.light_strokes,
             }
         self.status(f"Loading {Path(path).name}")
         self.path = Path(path)
@@ -154,6 +162,7 @@ class Engine:
         self._eye_masks = {}
         self.backdrop_cache = {}
         self.strokes, self.filled_previews = [], []
+        self.light_strokes, self._light_map = [], None
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
         if saved:
@@ -165,6 +174,7 @@ class Engine:
                 base = self._apply_stroke(base, stroke)
                 self.filled_previews.append(base)
             self.strokes = list(saved["strokes"])
+            self.light_strokes = list(saved.get("light_strokes", []))
         h, w = self.image.rgb.shape[:2]
         return {
             "width": w,
@@ -173,6 +183,7 @@ class Engine:
             "preview": _jpeg_b64(self.preview),
             "removals": len(self.strokes),
             "mask_edits": len(self.mask_edits),
+            "light_strokes": len(self.light_strokes),
         }
 
     def thumbnail(self, path: str, edge: int = 240) -> dict:
@@ -265,12 +276,14 @@ class Engine:
         removals: bool = True,
         skin: dict | None = None,
         model: str | None = None,
+        light: bool = True,
     ) -> dict:
         """Preview of the whole pipeline with the given tool settings. A tool is
-        left out by passing None (or removals=False), for per-step before views."""
+        left out by passing None (or removals=False, light=False), for per-step
+        before views."""
         self._require_image()
         return {
-            "preview": _jpeg_b64(self._render(backdrop, eyes, model, removals, skin)),
+            "preview": _jpeg_b64(self._render(backdrop, eyes, model, removals, skin, light)),
             "faces": len(self.faces) if self.faces is not None else None,
         }
 
@@ -283,19 +296,26 @@ class Engine:
         kind: str = "fill",
         strength: float = 1.0,
         skin: dict | None = None,
+        offset: list[float] | None = None,
     ) -> dict:
-        """Apply one painted stroke, then re-render the preview. ``kind`` is
-        "fill" (LaMa removal) or "reflection" (glasses reflection, alpha)."""
+        """Apply one Remove-panel edit, then re-render the preview. ``kind`` is
+        "fill" (LaMa removal), "reflection" (glasses reflection, alpha) or
+        "patch" (``points`` is the lasso outline, ``offset`` where the texture
+        comes from, both as fractions of width/height)."""
         self._require_image()
         if not points:
             raise ValueError("empty stroke")
-        if kind not in ("fill", "reflection"):
+        if kind not in ("fill", "reflection", "patch"):
             raise ValueError(f"unknown stroke kind {kind!r}")
         stroke = {"kind": kind, "points": points, "radius": radius}
         if kind == "reflection":
             stroke["strength"] = float(strength)
+        if kind == "patch":
+            if len(points) < 3 or offset is None:
+                raise ValueError("a patch needs an outline and an offset")
+            stroke = {"kind": kind, "points": points, "offset": [float(v) for v in offset]}
         base = self._edited_preview()
-        self.status("Removing reflection" if kind == "reflection" else "Removing")
+        self.status({"reflection": "Removing reflection", "patch": "Patching"}.get(kind, "Removing"))
         self.filled_previews.append(self._apply_stroke(base, stroke))
         self.strokes.append(stroke)
         self.edit_version += 1
@@ -325,6 +345,65 @@ class Engine:
         self.edit_version += 1
         return {"preview": _jpeg_b64(self._render(backdrop, eyes, skin_params=skin)), "removals": 0}
 
+    def light_paint(
+        self,
+        mode: str,
+        points: list[list[float]],
+        radius: float,
+        strength: float = 0.5,
+        softness: float = 0.5,
+        backdrop: dict | None = None,
+        eyes: dict | None = None,
+        skin: dict | None = None,
+    ) -> dict:
+        """Add one dodge ("dodge") or burn ("burn") stroke and re-render."""
+        self._require_image()
+        if not points:
+            raise ValueError("empty stroke")
+        if mode not in dodge_burn.MODES:
+            raise ValueError(f"unknown dodge & burn mode {mode!r}")
+        self.light_strokes.append(
+            {
+                "mode": mode,
+                "points": points,
+                "radius": float(radius),
+                "strength": float(strength),
+                "softness": float(softness),
+            }
+        )
+        return self._light_result(backdrop, eyes, skin)
+
+    def undo_light(
+        self, backdrop: dict | None = None, eyes: dict | None = None, skin: dict | None = None
+    ) -> dict:
+        self._require_image()
+        if self.light_strokes:
+            self.light_strokes.pop()
+        return self._light_result(backdrop, eyes, skin)
+
+    def clear_light(
+        self, backdrop: dict | None = None, eyes: dict | None = None, skin: dict | None = None
+    ) -> dict:
+        self._require_image()
+        self.light_strokes = []
+        return self._light_result(backdrop, eyes, skin)
+
+    def _light_result(self, backdrop, eyes, skin) -> dict:
+        return {
+            "preview": _jpeg_b64(self._render(backdrop, eyes, skin_params=skin)),
+            "light_strokes": len(self.light_strokes),
+        }
+
+    def _apply_light(self, rgb: np.ndarray) -> np.ndarray:
+        """Dodge & burn on the preview, reusing the exposure map while the
+        strokes are unchanged."""
+        if not self.light_strokes:
+            return rgb
+        key = json.dumps([rgb.shape, self.light_strokes])
+        if self._light_map is None or self._light_map[0] != key:
+            self._light_map = (key, dodge_burn.stops_map(rgb.shape[:2], self.light_strokes))
+        return dodge_burn.apply_stops(rgb, self._light_map[1])
+
     def _ensure_faces(self) -> list[np.ndarray]:
         if self.faces is None:
             manifest = self.registry.default_for("face_landmarks")
@@ -337,6 +416,8 @@ class Engine:
     def _apply_stroke(self, rgb: np.ndarray, stroke: dict) -> np.ndarray:
         """One Remove-panel stroke, at whatever resolution ``rgb`` is."""
         h, w = rgb.shape[:2]
+        if stroke.get("kind") == "patch":
+            return patch.apply(rgb, stroke["points"], stroke["offset"])
         if stroke.get("kind", "fill") == "reflection":
             mask = inpaint.stroke_mask((h, w), stroke["points"], stroke["radius"], grow=0)
             return reflection.remove(
@@ -369,11 +450,14 @@ class Engine:
         model: str | None = None,
         removals: bool = True,
         skin_params: dict | None = None,
+        light: bool = True,
     ) -> np.ndarray:
-        """Preview of the full pipeline: removals, backdrop smoothing, skin, eyes.
+        """Preview of the full pipeline: removals, backdrop smoothing, skin, eyes,
+        dodge & burn.
 
-        Skin and eyes come last: they only touch the subject, where the backdrop
-        step changes nothing, so their sliders never force a backdrop recompute.
+        Skin and eyes come after the backdrop: they only touch the subject, where
+        the backdrop step changes nothing, so their sliders never force a backdrop
+        recompute. Dodge & burn is last, so smoothing never flattens the shaping.
         """
         out = self._render_backdrop(backdrop, model, removals)
         if skin_params and not skin_tool.RegionParams.from_dict(skin_params.get("face")).is_noop():
@@ -382,7 +466,7 @@ class Engine:
             p = eye_tool.Params.from_dict(eyes_params)
             if not p.is_noop():
                 out = eye_tool.apply(out, self._ensure_faces(), p)
-        return out
+        return self._apply_light(out) if light else out
 
     def _render_backdrop(
         self, backdrop: dict | None, model: str | None, removals: bool = True
@@ -414,6 +498,7 @@ class Engine:
         removals: bool = True,
         model: str | None = None,
         skin: dict | None = None,
+        light: bool = True,
     ) -> dict:
         """A crop of the full-resolution result, for zoomed-in viewing.
 
@@ -428,7 +513,16 @@ class Engine:
         if x1 <= x0 or y1 <= y0:
             raise ValueError("empty region")
         key = json.dumps(
-            [backdrop, eyes, skin, removals, self.strokes, self.mask_edits, self.mask_model],
+            [
+                backdrop,
+                eyes,
+                skin,
+                removals,
+                self.strokes,
+                self.mask_edits,
+                self.mask_model,
+                self.light_strokes if light else None,
+            ],
             sort_keys=True,
         )
         cached = self._full.get("result")
@@ -436,7 +530,7 @@ class Engine:
             full = cached[1]
         else:
             self.status("Rendering full-resolution detail")
-            full, _ = self._full_pipeline(backdrop, eyes, removals, model, skin)
+            full, _ = self._full_pipeline(backdrop, eyes, removals, model, skin, light)
             self._full["result"] = (key, full)
         crop = full[y0:y1, x0:x1]
         scale = min(1.0, max(0.01, scale))
@@ -480,8 +574,10 @@ class Engine:
         removals: bool = True,
         model: str | None = None,
         skin_params: dict | None = None,
+        light: bool = True,
     ) -> tuple[np.ndarray, list[dict]]:
-        """The whole pipeline at full resolution: removals, backdrop, skin, eyes.
+        """The whole pipeline at full resolution: removals, backdrop, skin, eyes,
+        dodge & burn.
         Returns the image and the steps to record in the export's settings."""
         rgb = self.image.rgb
         steps: list[dict] = []
@@ -567,6 +663,11 @@ class Engine:
                         "models": [self.registry.default_for("face_landmarks").provenance()],
                     }
                 )
+
+        if light and self.light_strokes:
+            self.status("Dodging and burning at full resolution")
+            rgb = dodge_burn.apply(rgb, self.light_strokes)
+            steps.append({"tool": "dodge_burn", "strokes": self.light_strokes})
         return rgb, steps
 
     def _require_image(self) -> None:

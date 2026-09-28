@@ -16,6 +16,7 @@ export interface OpenResult {
   preview: string; // base64 JPEG
   removals: number; // restored when switching back to a photo
   mask_edits: number;
+  light_strokes: number; // dodge & burn strokes, restored likewise
 }
 
 export interface ModelInfo {

@@ -18,6 +18,8 @@ import {
   Glasses,
   RotateCcw,
   Sun,
+  Moon,
+  Lasso,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -32,6 +34,7 @@ import {
   onEngineEvent,
 } from "./api";
 import PaintOverlay from "./PaintOverlay";
+import PatchOverlay from "./PatchOverlay";
 import Slider from "./Slider";
 import Viewer, { Detail, ViewerHandle } from "./Viewer";
 import TitleBar from "./TitleBar";
@@ -142,7 +145,28 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
 
 // "compare": holding a panel's before button — the result without that step.
 type View = "result" | "before" | "mask" | "compare";
-type Step = "removals" | "backdrop" | "skin" | "eyes";
+type Step = "removals" | "backdrop" | "skin" | "eyes" | "light";
+const STEP_NAMES: Record<Step, string> = {
+  removals: "removals",
+  backdrop: "backdrop",
+  skin: "skin",
+  eyes: "eyes",
+  light: "dodge & burn",
+};
+
+// Brush modes: the Remove panel's (LaMa fill, glasses reflection, patch) and
+// the Dodge & Burn panel's.
+type BrushMode = "fill" | "reflection" | "patch" | "dodge" | "burn";
+const isLight = (m: BrushMode) => m === "dodge" || m === "burn";
+const BRUSH_COLOURS: Record<BrushMode, string | undefined> = {
+  fill: undefined, // PaintOverlay's red
+  reflection: "rgba(64, 200, 255, 0.45)",
+  patch: undefined,
+  dodge: "rgba(255, 255, 255, 0.35)",
+  burn: "rgba(0, 0, 0, 0.4)",
+};
+const LIGHT_DEFAULTS = { radius: 0.03, strength: 0.4, softness: 0.7 };
+const LIGHT_BRUSH = { min: 0.004, max: 0.15, step: 0.001 };
 
 const SKIN_REGION_DEFAULTS: SkinRegion = {
   blemishes: 0,
@@ -280,10 +304,16 @@ export default function App() {
   // usually want a different size from spot removals.
   const [maskBrushRadius, setMaskBrushRadius] = useState(BRUSH.default * 2);
   const [removals, setRemovals] = useState(0);
-  // Remove-panel brush mode: LaMa fill, or glasses reflection (alpha).
-  const [removeMode, setRemoveMode] = useState<"fill" | "reflection">("fill");
+  const [brushMode, setBrushMode] = useState<BrushMode>("fill");
   const [reflectionStrength, setReflectionStrength] = useState(1);
   const [removing, setRemoving] = useState(false);
+  // Dodge & burn: its own brush size (shaping strokes are broad), and the
+  // stroke count of the open photo.
+  const [lightRadius, setLightRadius] = useState(LIGHT_DEFAULTS.radius);
+  const [lightStrength, setLightStrength] = useState(LIGHT_DEFAULTS.strength);
+  const [lightSoftness, setLightSoftness] = useState(LIGHT_DEFAULTS.softness);
+  const [lightStrokes, setLightStrokes] = useState(0);
+  const [lighting, setLighting] = useState(false);
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
   const [maskEdits, setMaskEdits] = useState(0);
   const [maskPending, setMaskPending] = useState(false);
@@ -410,6 +440,7 @@ export default function App() {
           setImage({ ...r, path });
           setRemovals(r.removals);
           setMaskEdits(r.mask_edits);
+          setLightStrokes(r.light_strokes);
         }
         saveLastDir(path.replace(/\/[^/]*$/, ""));
         return true;
@@ -538,17 +569,56 @@ export default function App() {
   );
 
   const onStroke = (points: [number, number][], radius: number) =>
-    removalCall(
-      "remove",
-      removeMode === "reflection"
-        ? { points, radius, kind: "reflection", strength: reflectionStrength }
-        : { points, radius },
-    );
+    isLight(brushMode)
+      ? lightCall("light_paint", {
+          mode: brushMode,
+          points,
+          radius,
+          strength: lightStrength,
+          softness: lightSoftness,
+        })
+      : removalCall(
+          "remove",
+          brushMode === "reflection"
+            ? { points, radius, kind: "reflection", strength: reflectionStrength }
+            : { points, radius },
+        );
 
-  // Brush and Glasses pick the brush mode; clicking the active one turns it off.
-  const pickRemoveBrush = (mode: "fill" | "reflection") => {
-    setBrushOn((on) => !(on && removeMode === mode));
-    setRemoveMode(mode);
+  const onPatch = (outline: [number, number][], offset: [number, number]) =>
+    removalCall("remove", { points: outline, radius: 0, kind: "patch", offset });
+
+  // Dodge & burn calls return the whole pipeline's preview, like removals.
+  const lightCall = useCallback(
+    async (method: string, extra: Record<string, unknown> = {}) => {
+      setLighting(true);
+      setBusy(true);
+      try {
+        if (!(await ensureOpen())) return;
+        const r = await call<{ preview: string; light_strokes: number }>(method, {
+          ...extra,
+          backdrop: backdropArg(),
+          eyes: eyesRef.current,
+          skin: skinRef.current,
+        });
+        setResult(r.preview);
+        setLightStrokes(r.light_strokes);
+        setStatus("Ready");
+      } catch (e) {
+        handleError(e);
+      } finally {
+        setLighting(false);
+        setBusy(false);
+      }
+    },
+    [handleError, ensureOpen],
+  );
+  const undoLight = () => lightCall("undo_light");
+  const clearLight = () => lightCall("clear_light");
+
+  // The tool buttons pick the brush mode; clicking the active one turns it off.
+  const pickBrush = (mode: BrushMode) => {
+    setBrushOn((on) => !(on && brushMode === mode));
+    setBrushMode(mode);
     setZoomTool(false);
   };
   const undoRemove = () => removalCall("undo_remove");
@@ -562,9 +632,13 @@ export default function App() {
         e.preventDefault();
         if (view === "mask") {
           if (maskEdits > 0 && !maskPending) undoMaskEdit();
+        } else if (isLight(brushMode) && brushOn) {
+          if (lightStrokes > 0 && !lighting) undoLight();
         } else if (removals > 0 && !removing) undoRemove();
       } else if (view === "mask" && (e.key === "x" || e.key === "X")) {
         setMaskMode((m) => (m === "add" ? "subtract" : "add"));
+      } else if (isLight(brushMode) && (e.key === "x" || e.key === "X")) {
+        setBrushMode((m) => (m === "dodge" ? "burn" : "dodge"));
       } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
         e.preventDefault();
         viewerRef.current?.fit();
@@ -589,8 +663,12 @@ export default function App() {
       } else if (e.key === "[" || e.key === "]") {
         // Resize whichever brush is in use.
         const factor = e.key === "]" ? 1.2 : 1 / 1.2;
-        const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
-        setRadius((r) => clampBrush(r * factor));
+        if (view !== "mask" && isLight(brushMode)) {
+          setLightRadius((r) => Math.min(LIGHT_BRUSH.max, Math.max(LIGHT_BRUSH.min, r * factor)));
+        } else {
+          const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
+          setRadius((r) => clampBrush(r * factor));
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -644,6 +722,7 @@ export default function App() {
     setFaces(null);
     setRemovals(0);
     setMaskEdits(0);
+    setLightStrokes(0);
     const saved = settingsByPath.current.get(path);
     applySettings(saved ?? ALL_DEFAULTS);
     setModeIsAuto(autoMode.current.has(path));
@@ -653,6 +732,7 @@ export default function App() {
       setImage(openedInfo.current);
       setRemovals(openedInfo.current.removals);
       setMaskEdits(openedInfo.current.mask_edits);
+      setLightStrokes(openedInfo.current.light_strokes);
       render();
       return;
     }
@@ -676,6 +756,7 @@ export default function App() {
         preview: q.image,
         removals: 0,
         mask_edits: 0,
+        light_strokes: 0,
       });
     } catch (e) {
       handleError(e);
@@ -856,6 +937,7 @@ export default function App() {
         eyes: step === "eyes" ? null : eyesRef.current,
         skin: step === "skin" ? null : skinRef.current,
         removals: step !== "removals",
+        light: step !== "light",
       });
       if (token === compareToken.current) setCompareImg(r.preview);
     } catch (e) {
@@ -873,7 +955,7 @@ export default function App() {
   // that view's render arguments, and a tile for anything else is dropped.
   const detailArgs = (): Record<string, unknown> | null => {
     if (view === "mask") return null;
-    if (view === "before") return { backdrop: null, eyes: null, removals: false };
+    if (view === "before") return { backdrop: null, eyes: null, removals: false, light: false };
     const all = {
       backdrop: backdropArg(),
       eyes: eyesRef.current,
@@ -884,6 +966,7 @@ export default function App() {
     if (view === "compare" && compareStep === "backdrop") return { ...all, backdrop: null };
     if (view === "compare" && compareStep === "eyes") return { ...all, eyes: null };
     if (view === "compare" && compareStep === "removals") return { ...all, removals: false };
+    if (view === "compare" && compareStep === "light") return { ...all, light: false };
     return all;
   };
   const detailArgsRef = useRef(detailArgs);
@@ -1070,14 +1153,22 @@ export default function App() {
         >
           {({ panning }) => (
             <>
-              {image && view === "result" && (
+              {image && view === "result" && brushMode !== "patch" && (
                 <PaintOverlay
                   image={imgEl}
                   active={brushOn && !panning && !zoomTool}
-                  radius={brushRadius}
-                  pending={removing}
+                  radius={isLight(brushMode) ? lightRadius : brushRadius}
+                  pending={isLight(brushMode) ? lighting : removing}
                   onStroke={onStroke}
-                  colour={removeMode === "reflection" ? "rgba(64, 200, 255, 0.45)" : undefined}
+                  colour={BRUSH_COLOURS[brushMode]}
+                />
+              )}
+              {image && view === "result" && brushOn && brushMode === "patch" && (
+                <PatchOverlay
+                  image={imgEl}
+                  active={!panning && !zoomTool}
+                  pending={removing}
+                  onPatch={onPatch}
                 />
               )}
               {image && view === "mask" && (
@@ -1095,7 +1186,7 @@ export default function App() {
         </Viewer>
         {view === "before" && <div className="viewer__badge">Original</div>}
         {view === "compare" && compareImg && (
-          <div className="viewer__badge">Before · {compareStep}</div>
+          <div className="viewer__badge">Before · {compareStep && STEP_NAMES[compareStep]}</div>
         )}
         {view === "mask" && (
           <div className="viewer__badge">
@@ -1110,19 +1201,27 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={!image}
-              onClick={() => pickRemoveBrush("fill")}
-              className={brushOn && removeMode === "fill" ? "active" : ""}
+              onClick={() => pickBrush("fill")}
+              className={brushOn && brushMode === "fill" ? "active" : ""}
               title="Paint over anything to remove it (B)"
             >
               <Paintbrush size={15} /> Brush
             </button>
             <button
               disabled={!image}
-              onClick={() => pickRemoveBrush("reflection")}
-              className={brushOn && removeMode === "reflection" ? "active" : ""}
+              onClick={() => pickBrush("reflection")}
+              className={brushOn && brushMode === "reflection" ? "active" : ""}
               title="Glasses reflection (alpha): paint over a reflection on a lens to remove it"
             >
               <Glasses size={15} /> Glasses (alpha)
+            </button>
+            <button
+              disabled={!image}
+              onClick={() => pickBrush("patch")}
+              className={brushOn && brushMode === "patch" ? "active" : ""}
+              title="Patch: draw around an area, then drag it onto clean skin or backdrop to take its texture"
+            >
+              <Lasso size={15} /> Patch
             </button>
             <button
               disabled={!image || removals === 0 || removing}
@@ -1150,19 +1249,21 @@ export default function App() {
               <Eye size={15} /> Hold for before
             </button>
           </div>
-          <Slider
-            label="Brush size"
-            hint="Brush size ([ and ] keys)"
-            min={BRUSH.min}
-            max={BRUSH.max}
-            step={BRUSH.step}
-            value={brushRadius}
-            defaultValue={BRUSH.default}
-            format={(v) => (v * 100).toFixed(1)}
-            disabled={!image}
-            onChange={setBrushRadius}
-          />
-          {removeMode === "reflection" && (
+          {brushMode !== "patch" && (
+            <Slider
+              label="Brush size"
+              hint="Brush size ([ and ] keys)"
+              min={BRUSH.min}
+              max={BRUSH.max}
+              step={BRUSH.step}
+              value={brushRadius}
+              defaultValue={BRUSH.default}
+              format={(v) => (v * 100).toFixed(1)}
+              disabled={!image}
+              onChange={setBrushRadius}
+            />
+          )}
+          {brushMode === "reflection" && (
             <Slider
               label="Reflection strength"
               hint="How much of the reflection each new stroke removes"
@@ -1176,7 +1277,9 @@ export default function App() {
             />
           )}
           <p className="panel__model">
-            {removeMode === "reflection"
+            {brushOn && brushMode === "patch"
+              ? "Patch: draw around the area to fix, then drag the selection onto clean skin or backdrop. Its texture is blended in with the tone of the spot you're fixing. Esc drops the selection."
+              : brushMode === "reflection"
               ? "Glasses reflection (alpha): paint just the reflection, a little past its edges, not the whole lens. A faint trace may remain; paint over it again to take more."
               : removals > 0
                 ? `${removals} removal${removals === 1 ? "" : "s"} · LaMa · Apache-2.0`
@@ -1438,6 +1541,92 @@ export default function App() {
               : faces
                 ? `${faces} face${faces === 1 ? "" : "s"} · MediaPipe Face Landmarker · Apache-2.0`
                 : "Faces are found when you first move a slider. MediaPipe · Apache-2.0"}
+          </p>
+        </section>
+
+        <section className="panel">
+          <h2>Dodge &amp; Burn</h2>
+          <div className="panel__buttons">
+            <button
+              disabled={!image}
+              onClick={() => pickBrush("dodge")}
+              className={brushOn && brushMode === "dodge" ? "active" : ""}
+              title="Dodge: paint to lighten (X swaps with Burn)"
+            >
+              <Sun size={15} /> Dodge
+            </button>
+            <button
+              disabled={!image}
+              onClick={() => pickBrush("burn")}
+              className={brushOn && brushMode === "burn" ? "active" : ""}
+              title="Burn: paint to darken (X swaps with Dodge)"
+            >
+              <Moon size={15} /> Burn
+            </button>
+            <button
+              disabled={!image || lightStrokes === 0 || lighting}
+              onClick={undoLight}
+              title="Undo the last dodge or burn stroke (Ctrl+Z while the brush is on)"
+            >
+              <Undo2 size={15} /> Undo
+            </button>
+            <button
+              disabled={!image || lightStrokes === 0 || lighting}
+              onClick={clearLight}
+              title="Remove every dodge and burn stroke"
+            >
+              <Trash2 size={15} /> Clear
+            </button>
+          </div>
+          <div className="panel__buttons">
+            <button
+              disabled={!image || lightStrokes === 0 || lighting || view === "mask"}
+              onPointerDown={() => holdWithout("light")}
+              onPointerUp={releaseCompare}
+              onPointerLeave={releaseCompare}
+              title="Hold to see the photo without dodge & burn"
+            >
+              <Eye size={15} /> Hold for before
+            </button>
+          </div>
+          <Slider
+            label="Brush size"
+            hint="Brush size ([ and ] keys)"
+            min={LIGHT_BRUSH.min}
+            max={LIGHT_BRUSH.max}
+            step={LIGHT_BRUSH.step}
+            value={lightRadius}
+            defaultValue={LIGHT_DEFAULTS.radius}
+            format={(v) => (v * 100).toFixed(1)}
+            disabled={!image}
+            onChange={setLightRadius}
+          />
+          <Slider
+            label="Strength"
+            hint="How much each stroke lightens or darkens; overlapping strokes build up"
+            min={0.05}
+            max={1}
+            step={0.05}
+            value={lightStrength}
+            defaultValue={LIGHT_DEFAULTS.strength}
+            disabled={!image}
+            onChange={setLightStrength}
+          />
+          <Slider
+            label="Softness"
+            hint="How gradually the stroke fades out at its edge"
+            min={0}
+            max={1}
+            step={0.05}
+            value={lightSoftness}
+            defaultValue={LIGHT_DEFAULTS.softness}
+            disabled={!image}
+            onChange={setLightSoftness}
+          />
+          <p className="panel__model">
+            {lightStrokes > 0
+              ? `${lightStrokes} stroke${lightStrokes === 1 ? "" : "s"} · X swaps dodge and burn`
+              : "Paint light and shade to shape the face. Low strength and several passes look most natural. X swaps dodge and burn."}
           </p>
         </section>
       </aside>
