@@ -49,6 +49,19 @@ export interface EyesParams {
   veins: number;
 }
 
+export interface SkinRegion {
+  blemishes: number;
+  smooth: number;
+  even: number;
+  shine: number; // -1 matte .. 0 natural .. +1 gloss
+}
+
+export interface SkinParams {
+  face: SkinRegion;
+  neck: SkinRegion;
+  body: SkinRegion;
+}
+
 export type EngineEvent =
   | { event: "status"; message: string }
   | { event: "stopped" };

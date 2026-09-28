@@ -9,6 +9,8 @@ interface Props {
   defaultValue: number;
   disabled?: boolean;
   format?: (v: number) => string;
+  /** Two-sided slider (e.g. matte .. gloss): the fill grows from the centre. */
+  centred?: boolean;
   onChange: (v: number) => void;
 }
 
@@ -23,9 +25,13 @@ export default function Slider({
   defaultValue,
   disabled,
   format = (v) => v.toFixed(2),
+  centred,
   onChange,
 }: Props) {
   const pct = ((value - min) / (max - min)) * 100;
+  const fill = centred
+    ? `linear-gradient(to right, #3a3b45 ${Math.min(pct, 50)}%, #ffcc33 ${Math.min(pct, 50)}%, #ffcc33 ${Math.max(pct, 50)}%, #3a3b45 ${Math.max(pct, 50)}%)`
+    : `linear-gradient(to right, #ffcc33 ${pct}%, #3a3b45 ${pct}%)`;
   return (
     <label className="slider" title={hint}>
       <span className="slider__head">
@@ -38,7 +44,7 @@ export default function Slider({
         max={max}
         step={step}
         value={value}
-        style={{ background: `linear-gradient(to right, #ffcc33 ${pct}%, #3a3b45 ${pct}%)` }}
+        style={{ background: fill }}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
         onDoubleClick={() => onChange(defaultValue)}

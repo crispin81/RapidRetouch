@@ -26,6 +26,7 @@ from . import imageio
 from .registry import LicenceNotAccepted, Registry
 from .tools import backdrop_smooth, inpaint, mask_edit, reflection
 from .tools import eyes as eye_tool
+from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
 METHODS = {
@@ -254,13 +255,14 @@ class Engine:
         backdrop: dict | None = None,
         eyes: dict | None = None,
         removals: bool = True,
+        skin: dict | None = None,
         model: str | None = None,
     ) -> dict:
         """Preview of the whole pipeline with the given tool settings. A tool is
         left out by passing None (or removals=False), for per-step before views."""
         self._require_image()
         return {
-            "preview": _jpeg_b64(self._render(backdrop, eyes, model, removals)),
+            "preview": _jpeg_b64(self._render(backdrop, eyes, model, removals, skin)),
             "faces": len(self.faces) if self.faces is not None else None,
         }
 
@@ -272,6 +274,7 @@ class Engine:
         eyes: dict | None = None,
         kind: str = "fill",
         strength: float = 1.0,
+        skin: dict | None = None,
     ) -> dict:
         """Apply one painted stroke, then re-render the preview. ``kind`` is
         "fill" (LaMa removal) or "reflection" (glasses reflection, alpha)."""
@@ -288,21 +291,31 @@ class Engine:
         self.filled_previews.append(self._apply_stroke(base, stroke))
         self.strokes.append(stroke)
         self.edit_version += 1
-        return {"preview": _jpeg_b64(self._render(backdrop, eyes)), "removals": len(self.strokes)}
+        return {
+            "preview": _jpeg_b64(self._render(backdrop, eyes, skin_params=skin)),
+            "removals": len(self.strokes),
+        }
 
-    def undo_remove(self, backdrop: dict | None = None, eyes: dict | None = None) -> dict:
+    def undo_remove(
+        self, backdrop: dict | None = None, eyes: dict | None = None, skin: dict | None = None
+    ) -> dict:
         self._require_image()
         if self.strokes:
             self.strokes.pop()
             self.filled_previews.pop()
             self.edit_version += 1
-        return {"preview": _jpeg_b64(self._render(backdrop, eyes)), "removals": len(self.strokes)}
+        return {
+            "preview": _jpeg_b64(self._render(backdrop, eyes, skin_params=skin)),
+            "removals": len(self.strokes),
+        }
 
-    def clear_removals(self, backdrop: dict | None = None, eyes: dict | None = None) -> dict:
+    def clear_removals(
+        self, backdrop: dict | None = None, eyes: dict | None = None, skin: dict | None = None
+    ) -> dict:
         self._require_image()
         self.strokes, self.filled_previews = [], []
         self.edit_version += 1
-        return {"preview": _jpeg_b64(self._render(backdrop, eyes)), "removals": 0}
+        return {"preview": _jpeg_b64(self._render(backdrop, eyes, skin_params=skin)), "removals": 0}
 
     def _ensure_faces(self) -> list[np.ndarray]:
         if self.faces is None:
@@ -347,13 +360,16 @@ class Engine:
         eyes_params: dict | None = None,
         model: str | None = None,
         removals: bool = True,
+        skin_params: dict | None = None,
     ) -> np.ndarray:
-        """Preview of the full pipeline: removals, backdrop smoothing, then eyes.
+        """Preview of the full pipeline: removals, backdrop smoothing, skin, eyes.
 
-        Eyes go last: they only touch skin inside the subject, where the backdrop
-        step changes nothing, so eye sliders never force a backdrop recompute.
+        Skin and eyes come last: they only touch the subject, where the backdrop
+        step changes nothing, so their sliders never force a backdrop recompute.
         """
         out = self._render_backdrop(backdrop, model, removals)
+        if skin_params and not skin_tool.RegionParams.from_dict(skin_params.get("face")).is_noop():
+            out = skin_tool.apply(out, self._ensure_faces(), skin_params.get("face"))
         if eyes_params is not None:
             p = eye_tool.Params.from_dict(eyes_params)
             if not p.is_noop():
@@ -389,6 +405,7 @@ class Engine:
         eyes: dict | None = None,
         removals: bool = True,
         model: str | None = None,
+        skin: dict | None = None,
     ) -> dict:
         """A crop of the full-resolution result, for zoomed-in viewing.
 
@@ -403,7 +420,7 @@ class Engine:
         if x1 <= x0 or y1 <= y0:
             raise ValueError("empty region")
         key = json.dumps(
-            [backdrop, eyes, removals, self.strokes, self.mask_edits, self.mask_model],
+            [backdrop, eyes, skin, removals, self.strokes, self.mask_edits, self.mask_model],
             sort_keys=True,
         )
         cached = self._full.get("result")
@@ -411,7 +428,7 @@ class Engine:
             full = cached[1]
         else:
             self.status("Rendering full-resolution detail")
-            full, _ = self._full_pipeline(backdrop, eyes, removals, model)
+            full, _ = self._full_pipeline(backdrop, eyes, removals, model, skin)
             self._full["result"] = (key, full)
         crop = full[y0:y1, x0:x1]
         scale = min(1.0, max(0.01, scale))
@@ -426,12 +443,13 @@ class Engine:
         backdrop: dict | None = None,
         eyes: dict | None = None,
         model: str | None = None,
+        skin: dict | None = None,
     ) -> dict:
         self._require_image()
         out = Path(path)
         if out.resolve() == self.path.resolve():
             raise ValueError("refusing to overwrite the original image")
-        rgb, steps = self._full_pipeline(backdrop, eyes, True, model)
+        rgb, steps = self._full_pipeline(backdrop, eyes, True, model, skin)
         self.status(f"Writing {out.name}")
         imageio.save(out, rgb, self.image.bit_depth, self.image.icc)
         settings = {"source": str(self.path), "steps": steps}
@@ -453,8 +471,9 @@ class Engine:
         eyes_params: dict | None,
         removals: bool = True,
         model: str | None = None,
+        skin_params: dict | None = None,
     ) -> tuple[np.ndarray, list[dict]]:
-        """The whole pipeline at full resolution: removals, backdrop, eyes.
+        """The whole pipeline at full resolution: removals, backdrop, skin, eyes.
         Returns the image and the steps to record in the export's settings."""
         rgb = self.image.rgb
         steps: list[dict] = []
@@ -510,6 +529,21 @@ class Engine:
                     "models": [self.registry.manifests[self.mask_model].provenance()],
                 }
             )
+
+        if skin_params:
+            face_p = skin_tool.RegionParams.from_dict(skin_params.get("face"))
+            if not face_p.is_noop():
+                faces = self._ensure_faces()
+                self.status("Retouching skin at full resolution")
+                rgb = skin_tool.apply(rgb, faces, skin_params.get("face"))
+                steps.append(
+                    {
+                        "tool": "skin",
+                        "face": asdict(face_p),
+                        "faces": len(faces),
+                        "models": [self.registry.default_for("face_landmarks").provenance()],
+                    }
+                )
 
         if eyes_params is not None:
             p = eye_tool.Params.from_dict(eyes_params)

@@ -21,6 +21,8 @@ import {
   BackdropParams,
   EngineError,
   EyesParams,
+  SkinParams,
+  SkinRegion,
   ModelInfo,
   OpenResult,
   call,
@@ -36,6 +38,7 @@ import FilmStrip, { StripItem } from "./FilmStrip";
 interface PhotoSettings {
   backdrop: BackdropParams;
   eyes: EyesParams;
+  skin: SkinParams;
 }
 const sameSettings = (a: PhotoSettings, b: PhotoSettings) =>
   JSON.stringify(a) === JSON.stringify(b);
@@ -136,7 +139,39 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
 
 // "compare": holding a panel's before button — the result without that step.
 type View = "result" | "before" | "mask" | "compare";
-type Step = "removals" | "backdrop" | "eyes";
+type Step = "removals" | "backdrop" | "skin" | "eyes";
+
+const SKIN_REGION_DEFAULTS: SkinRegion = { blemishes: 0, smooth: 0, even: 0, shine: 0 };
+const SKIN_DEFAULTS: SkinParams = {
+  face: SKIN_REGION_DEFAULTS,
+  neck: SKIN_REGION_DEFAULTS,
+  body: SKIN_REGION_DEFAULTS,
+};
+type SkinTab = keyof SkinParams;
+const ALL_DEFAULTS = { backdrop: DEFAULTS, eyes: EYE_DEFAULTS, skin: SKIN_DEFAULTS };
+const SKIN_TABS: { key: SkinTab; label: string; ready: boolean }[] = [
+  { key: "face", label: "Face", ready: true },
+  { key: "neck", label: "Neck", ready: false },
+  { key: "body", label: "Body", ready: false },
+];
+const SKIN_SLIDERS: {
+  key: keyof SkinRegion;
+  label: string;
+  hint: string;
+  min: number;
+  centred?: boolean;
+}[] = [
+  { key: "blemishes", label: "Blemishes", hint: "Heal small spots and marks; skin texture is kept", min: 0 },
+  { key: "smooth", label: "Smooth", hint: "Even out blotchy light and shade; pores and fine texture are kept", min: 0 },
+  { key: "even", label: "Even tone", hint: "Move red or blotchy patches toward the person's own skin tone", min: 0 },
+  {
+    key: "shine",
+    label: "Shine",
+    hint: "Left for matte, right for gloss, middle for natural",
+    min: -1,
+    centred: true,
+  },
+];
 
 // Linux file dialogs match extensions case-sensitively (cameras write "P1167822.RW2"),
 // so every filter lists both cases.
@@ -185,6 +220,8 @@ export default function App() {
   const [view, setView] = useState<View>("result");
   const [params, setParams] = useState<BackdropParams>(DEFAULTS);
   const [eyesParams, setEyesParams] = useState<EyesParams>(EYE_DEFAULTS);
+  const [skinParams, setSkinParams] = useState<SkinParams>(SKIN_DEFAULTS);
+  const [skinTab, setSkinTab] = useState<SkinTab>("face");
   const [faces, setFaces] = useState<number | null>(null);
   const [maskModel, setMaskModel] = useState<ModelInfo | null>(null);
   const [licencePrompt, setLicencePrompt] = useState<EngineError | null>(null);
@@ -236,6 +273,7 @@ export default function App() {
   // sliders moved and render once more with the latest values afterwards.
   const paramsRef = useRef(params);
   const eyesRef = useRef(eyesParams);
+  const skinRef = useRef(skinParams);
   const inFlight = useRef(false);
   const dirty = useRef(false);
 
@@ -345,6 +383,7 @@ export default function App() {
         const r = await call<{ preview: string; faces: number | null }>("render", {
           backdrop: paramsRef.current,
           eyes: eyesRef.current,
+          skin: skinRef.current,
         });
         // Moved on to another photo meanwhile: don't show this one's result.
         if (forPath !== activePath.current) break;
@@ -367,6 +406,13 @@ export default function App() {
     render();
   };
 
+  const updateSkin = (region: SkinTab, key: keyof SkinRegion, value: number) => {
+    const next = { ...skinRef.current, [region]: { ...skinRef.current[region], [key]: value } };
+    skinRef.current = next;
+    setSkinParams(next);
+    render();
+  };
+
   const updateEyes = (key: keyof EyesParams, value: number) => {
     const next = { ...eyesRef.current, [key]: value };
     eyesRef.current = next;
@@ -385,6 +431,7 @@ export default function App() {
           ...extra,
           backdrop: paramsRef.current,
           eyes: eyesRef.current,
+          skin: skinRef.current,
         });
         setResult(r.preview);
         setRemovals(r.removals);
@@ -462,11 +509,14 @@ export default function App() {
   const currentSettings = (): PhotoSettings => ({
     backdrop: paramsRef.current,
     eyes: eyesRef.current,
+    skin: skinRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
     paramsRef.current = st.backdrop;
     eyesRef.current = st.eyes;
+    skinRef.current = st.skin;
+    setSkinParams(st.skin);
     setParams(st.backdrop);
     setEyesParams(st.eyes);
   };
@@ -475,7 +525,7 @@ export default function App() {
     setStrip((items) =>
       items.map((i) =>
         i.path === path
-          ? { ...i, edited: !sameSettings(st, { backdrop: DEFAULTS, eyes: EYE_DEFAULTS }) }
+          ? { ...i, edited: !sameSettings(st, ALL_DEFAULTS) }
           : i,
       ),
     );
@@ -500,7 +550,7 @@ export default function App() {
     setFaces(null);
     setRemovals(0);
     setMaskEdits(0);
-    applySettings(settingsByPath.current.get(path) ?? { backdrop: DEFAULTS, eyes: EYE_DEFAULTS });
+    applySettings(settingsByPath.current.get(path) ?? ALL_DEFAULTS);
 
     // Back to the photo the engine already has: no need to wait.
     if (openedPath.current === path && openedInfo.current) {
@@ -679,6 +729,7 @@ export default function App() {
       const r = await call<{ preview: string }>("render", {
         backdrop: step === "backdrop" ? null : paramsRef.current,
         eyes: step === "eyes" ? null : eyesRef.current,
+        skin: step === "skin" ? null : skinRef.current,
         removals: step !== "removals",
       });
       if (token === compareToken.current) setCompareImg(r.preview);
@@ -698,7 +749,13 @@ export default function App() {
   const detailArgs = (): Record<string, unknown> | null => {
     if (view === "mask") return null;
     if (view === "before") return { backdrop: null, eyes: null, removals: false };
-    const all = { backdrop: paramsRef.current, eyes: eyesRef.current, removals: true };
+    const all = {
+      backdrop: paramsRef.current,
+      eyes: eyesRef.current,
+      skin: skinRef.current,
+      removals: true,
+    };
+    if (view === "compare" && compareStep === "skin") return { ...all, skin: null };
     if (view === "compare" && compareStep === "backdrop") return { ...all, backdrop: null };
     if (view === "compare" && compareStep === "eyes") return { ...all, eyes: null };
     if (view === "compare" && compareStep === "removals") return { ...all, removals: false };
@@ -772,6 +829,7 @@ export default function App() {
         path,
         backdrop: paramsRef.current,
         eyes: eyesRef.current,
+        skin: skinRef.current,
       });
       setStatus(`Exported ${r.path.split("/").pop()}`);
     } catch (e) {
@@ -1089,6 +1147,62 @@ export default function App() {
         </section>
 
         <section className="panel">
+          <h2>Skin</h2>
+          <div className="tabs">
+            {SKIN_TABS.map((t) => (
+              <button
+                key={t.key}
+                className={skinTab === t.key ? "active" : ""}
+                disabled={!t.ready}
+                onClick={() => setSkinTab(t.key)}
+                title={t.ready ? undefined : "Coming next"}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {SKIN_SLIDERS.map((s) => (
+            <Slider
+              key={`${skinTab}-${s.key}`}
+              label={s.label}
+              hint={s.hint}
+              min={s.min}
+              max={1}
+              step={0.01}
+              centred={s.centred}
+              value={skinParams[skinTab][s.key]}
+              defaultValue={SKIN_REGION_DEFAULTS[s.key]}
+              format={
+                s.key === "shine"
+                  ? (v) => (v < -0.005 ? `Matte ${(-v).toFixed(2)}` : v > 0.005 ? `Gloss ${v.toFixed(2)}` : "Natural")
+                  : undefined
+              }
+              disabled={!image}
+              onChange={(v) => updateSkin(skinTab, s.key, v)}
+            />
+          ))}
+          <div className="panel__buttons">
+            <button
+              disabled={
+                !image ||
+                view === "mask" ||
+                Object.values(skinParams).every((r) => Object.values(r).every((v) => v === 0))
+              }
+              onPointerDown={() => holdWithout("skin")}
+              onPointerUp={releaseCompare}
+              onPointerLeave={releaseCompare}
+              title="Hold to see the photo without the skin retouching"
+            >
+              <Eye size={15} /> Hold for before
+            </button>
+          </div>
+          <p className="panel__model">
+            Facial hair, eyes, brows and lips are left alone automatically. Neck and Body are coming
+            next.
+          </p>
+        </section>
+
+        <section className="panel">
           <h2>Eyes</h2>
           {EYE_SLIDERS.map((s) => (
             <Slider
@@ -1136,8 +1250,8 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, eyes: eyesParams },
-                    { backdrop: DEFAULTS, eyes: EYE_DEFAULTS },
+                    { backdrop: params, eyes: eyesParams, skin: skinParams },
+                    ALL_DEFAULTS,
                   ),
                 }
               : i,

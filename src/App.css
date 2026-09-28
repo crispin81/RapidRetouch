@@ -266,6 +266,7 @@ button.primary {
 
 .panel__buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -682,4 +683,28 @@ button.primary {
     transform: scale(1);
     opacity: 1;
   }
+}
+
+/* Segmented tabs (Skin: Face / Neck / Body) */
+.tabs {
+  display: flex;
+  gap: 0;
+}
+
+.tabs button {
+  flex: 1;
+  justify-content: center;
+  border-radius: 0;
+}
+
+.tabs button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.tabs button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.tabs button + button {
+  border-left: none;
 }
