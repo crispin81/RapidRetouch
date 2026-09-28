@@ -729,9 +729,14 @@ button.primary {
   margin-right: auto;
 }
 
-.panel__toggle {
-  padding: 3px 9px;
-  font-size: 11px;
+.panel__modes {
+  margin-right: auto;
+}
+
+.panel__modes button {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 11.5px;
 }
 
 .reset-button {

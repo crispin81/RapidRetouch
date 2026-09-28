@@ -1149,15 +1149,24 @@ export default function App() {
 
         <section className="panel">
           <div className="panel__head">
-            <h2>Backdrop</h2>
-            <button
-              className={`panel__toggle ${outdoor ? "active" : ""}`}
-              disabled={!image}
-              onClick={toggleOutdoor}
-              title="Outdoor: turn the backdrop step off, for portraits not shot on a backdrop"
-            >
-              <Sun size={13} /> Outdoor
-            </button>
+            <div className="tabs panel__modes">
+              <button
+                className={!outdoor ? "active" : ""}
+                disabled={!image}
+                onClick={() => outdoor && toggleOutdoor()}
+                title="Studio backdrop: smooth, even out and adjust the backdrop"
+              >
+                <Layers size={13} /> Backdrop
+              </button>
+              <button
+                className={outdoor ? "active" : ""}
+                disabled={!image}
+                onClick={() => !outdoor && toggleOutdoor()}
+                title="Outdoor: no backdrop step, for portraits not shot on a backdrop"
+              >
+                <Sun size={13} /> Outdoor
+              </button>
+            </div>
             <ResetButton
               disabled={!image || sameValues(params, DEFAULTS)}
               onClick={resetBackdrop}
