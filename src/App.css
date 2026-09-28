@@ -717,3 +717,17 @@ button.primary {
   text-transform: uppercase;
   color: #8d8e99;
 }
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.reset-button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+}

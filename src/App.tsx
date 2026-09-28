@@ -16,6 +16,7 @@ import {
   Coffee,
   Smile,
   Glasses,
+  RotateCcw,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -40,8 +41,8 @@ interface PhotoSettings {
   eyes: EyesParams;
   skin: SkinParams;
 }
-const sameSettings = (a: PhotoSettings, b: PhotoSettings) =>
-  JSON.stringify(a) === JSON.stringify(b);
+const sameValues = (a: object, b: object) => JSON.stringify(a) === JSON.stringify(b);
+const sameSettings = (a: PhotoSettings, b: PhotoSettings) => sameValues(a, b);
 
 const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
 // No tutorial video yet: the banner does nothing until this is set.
@@ -227,6 +228,27 @@ const saveLastDir = (dir: string) => {
 function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) return String((e as EngineError).message);
   return String(e);
+}
+
+function ResetButton({
+  disabled,
+  onClick,
+  what,
+}: {
+  disabled: boolean;
+  onClick: () => void;
+  what: string;
+}) {
+  return (
+    <button
+      className="reset-button"
+      disabled={disabled}
+      onClick={onClick}
+      title={`Reset ${what} to defaults`}
+    >
+      <RotateCcw size={13} />
+    </button>
+  );
 }
 
 export default function App() {
@@ -429,6 +451,31 @@ export default function App() {
     const next = { ...skinRef.current, [region]: { ...skinRef.current[region], [key]: value } };
     skinRef.current = next;
     setSkinParams(next);
+    render();
+  };
+
+  // Reset buttons beside each group's heading.
+  const resetBackdrop = () => {
+    paramsRef.current = DEFAULTS;
+    setParams(DEFAULTS);
+    render();
+  };
+  const resetSkin = () => {
+    skinRef.current = SKIN_DEFAULTS;
+    setSkinParams(SKIN_DEFAULTS);
+    render();
+  };
+  const resetWrinkles = () => {
+    const face = { ...skinRef.current.face };
+    for (const s of WRINKLE_SLIDERS) face[s.key] = 0;
+    const next = { ...skinRef.current, face };
+    skinRef.current = next;
+    setSkinParams(next);
+    render();
+  };
+  const resetEyes = () => {
+    eyesRef.current = EYE_DEFAULTS;
+    setEyesParams(EYE_DEFAULTS);
     render();
   };
 
@@ -1079,7 +1126,14 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <h2>Backdrop</h2>
+          <div className="panel__head">
+            <h2>Backdrop</h2>
+            <ResetButton
+              disabled={!image || sameValues(params, DEFAULTS)}
+              onClick={resetBackdrop}
+              what="Backdrop"
+            />
+          </div>
           {SLIDERS.map((s) => (
             <Slider
               key={s.key}
@@ -1166,7 +1220,14 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <h2>Skin</h2>
+          <div className="panel__head">
+            <h2>Skin</h2>
+            <ResetButton
+              disabled={!image || sameValues(skinParams, SKIN_DEFAULTS)}
+              onClick={resetSkin}
+              what="Skin (Face, Neck and Body)"
+            />
+          </div>
           <div className="tabs">
             {SKIN_TABS.map((t) => (
               <button
@@ -1202,7 +1263,14 @@ export default function App() {
           ))}
           {skinTab === "face" && (
             <>
-              <h3 className="panel__subhead">Wrinkles</h3>
+              <div className="panel__head">
+                <h3 className="panel__subhead">Wrinkles</h3>
+                <ResetButton
+                  disabled={!image || WRINKLE_SLIDERS.every((s) => skinParams.face[s.key] === 0)}
+                  onClick={resetWrinkles}
+                  what="Wrinkles"
+                />
+              </div>
               {WRINKLE_SLIDERS.map((s) => (
                 <Slider
                   key={s.key}
@@ -1241,7 +1309,14 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <h2>Eyes</h2>
+          <div className="panel__head">
+            <h2>Eyes</h2>
+            <ResetButton
+              disabled={!image || sameValues(eyesParams, EYE_DEFAULTS)}
+              onClick={resetEyes}
+              what="Eyes"
+            />
+          </div>
           {EYE_SLIDERS.map((s) => (
             <Slider
               key={s.key}

@@ -231,6 +231,11 @@ BLEMISH_ROUND = 0.35  # smaller/larger curvature ratio: round spots, not lines
 BLEMISH_DARK = (0.5, 1.2)  # spot strength ramp, Lab L
 BLEMISH_RED = (0.35, 0.9)  # spot strength ramp, Lab a
 TEXTURE_KEEP = 0.003  # face widths: finer than this is texture, always kept
+# Moles are kept (part of someone's identity; the Remove brush takes one out):
+# clearly darker than the skin around them, but not mainly redder, which is
+# what marks a blemish.
+MOLE_DARK = (2.0, 3.5)  # round-spot strength (Lab L): well above a typical blemish
+MOLE_BROWN = (0.35, 0.7)  # redness per unit of darkness above this is a blemish
 SMOOTH_BAND = (0.006, 0.04)  # blotchy light and shade flattened by Smooth
 SMOOTH_MAX = 0.75
 TONE_SIGMA = 0.03  # broad colour evened by Even tone
@@ -313,6 +318,21 @@ def _skin_base(channel: np.ndarray, W: np.ndarray, radius_px: float) -> np.ndarr
     )
 
 
+def _moles(L: np.ndarray, a: np.ndarray, fw: float) -> np.ndarray:
+    """Where moles are (0..1), grown a little so their edges are kept too."""
+    # Compact and round (shadows along the nose or eye sockets are long, so the
+    # round-spot detector ignores them), strongly darker, and brown not red.
+    round_dark = _blobs(L, fw)
+    small = max(0.7, BLEMISH_SCALES[1] * fw)
+    large = max(1.0, 3 * BLEMISH_SCALES[-1] * fw)
+    darker = cv2.GaussianBlur(L, (0, 0), large) - cv2.GaussianBlur(L, (0, 0), small)
+    redder = cv2.GaussianBlur(a, (0, 0), small) - cv2.GaussianBlur(a, (0, 0), large)
+    ratio = redder / np.maximum(darker, 1.0)
+    mole = _smoothstep(round_dark, *MOLE_DARK) * (1 - _smoothstep(ratio, *MOLE_BROWN))
+    grow = 2 * max(1, round(BLEMISH_SCALES[-1] * fw)) + 1
+    return np.clip(cv2.dilate(mole, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow))), 0, 1)
+
+
 def _heal_blemishes(lab, W, fw, amount):
     L = np.ascontiguousarray(lab[..., 0])
     a = np.ascontiguousarray(lab[..., 1])
@@ -322,7 +342,7 @@ def _heal_blemishes(lab, W, fw, amount):
     broad = cv2.GaussianBlur(L, (0, 0), max(0.7, BLEMISH_SCALES[-1] * fw))
     gy, gx = np.gradient(broad)
     edge = _smoothstep(np.hypot(gx, gy) * 2 * BLEMISH_SCALES[-1] * fw, *EDGE_GATE)
-    spot = np.maximum(dark, red) * W * (1 - edge)
+    spot = np.maximum(dark, red) * W * (1 - edge) * (1 - _moles(L, a, fw))
     grow = max(1.0, BLEMISH_SCALES[-1] * fw)
     spot = cv2.GaussianBlur(cv2.dilate(spot, np.ones((3, 3), np.uint8), iterations=max(1, round(grow / 2))), (0, 0), grow / 2)
     spot = np.clip(spot * 1.5, 0, 1)
