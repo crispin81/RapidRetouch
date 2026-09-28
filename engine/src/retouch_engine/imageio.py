@@ -31,6 +31,19 @@ def _srgb_icc() -> bytes:
     return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 
 
+def _develop_params() -> dict:
+    """LibRaw development settings, shared by the full open and the quick
+    previews so a preview's colours match the opened photo exactly."""
+    import rawpy
+
+    return dict(
+        use_camera_wb=True,
+        no_auto_bright=True,
+        output_color=rawpy.ColorSpace.sRGB,
+        gamma=(2.4, 12.92),
+    )
+
+
 def _load_raw(path: Path) -> LoadedImage:
     """Develop a RAW file with LibRaw to 16-bit sRGB.
 
@@ -41,13 +54,7 @@ def _load_raw(path: Path) -> LoadedImage:
     import rawpy
 
     with rawpy.imread(str(path)) as raw:
-        data = raw.postprocess(
-            output_bps=16,
-            use_camera_wb=True,
-            no_auto_bright=True,
-            output_color=rawpy.ColorSpace.sRGB,
-            gamma=(2.4, 12.92),
-        )
+        data = raw.postprocess(output_bps=16, **_develop_params())
     return LoadedImage(data.astype(np.float32) / 65535.0, 16, _srgb_icc())
 
 
@@ -98,34 +105,21 @@ def thumbnail(path: str | Path, edge: int = 240) -> tuple[Image.Image, tuple[int
     """A small, correctly rotated preview, fast, plus the photo's full size
     (width, height) as it will be once opened.
 
-    RAW files use the camera's embedded JPEG (a few ms) rotated by LibRaw's
-    orientation flag, falling back to a quick half-size decode; other files are
-    read and shrunk."""
+    RAW files are developed exactly as when opened, but at half size (which
+    skips full demosaicing, ~0.17 s for 24 MP). The camera's embedded JPEG would
+    be ten times faster but carries the camera's own picture style, so the
+    colours visibly jumped when the photo then opened."""
     path = Path(path)
     if path.suffix.lower() in RAW_EXTENSIONS:
-        import io
-
         import rawpy
 
         with rawpy.imread(str(path)) as raw:
-            flip = raw.sizes.flip
+            # Read the size first: a half-size develop updates it to half.
             full = (raw.sizes.width, raw.sizes.height)
-            if flip in (5, 6):
+            if raw.sizes.flip in (5, 6):
                 full = full[::-1]
-            try:
-                th = raw.extract_thumb()
-                if th.format == rawpy.ThumbFormat.JPEG:
-                    im = Image.open(io.BytesIO(th.data)).convert("RGB")
-                else:
-                    im = Image.fromarray(th.data).convert("RGB")
-            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-                im = Image.fromarray(raw.postprocess(half_size=True, use_camera_wb=True))
-                flip = 0  # postprocess already applies the orientation
-        # LibRaw flip: 3 = 180 degrees, 5 = 90 anticlockwise, 6 = 90 clockwise.
-        rotate = {3: Image.Transpose.ROTATE_180, 5: Image.Transpose.ROTATE_90,
-                  6: Image.Transpose.ROTATE_270}.get(flip)
-        if rotate is not None:
-            im = im.transpose(rotate)
+            data = raw.postprocess(half_size=True, output_bps=8, **_develop_params())
+        im = Image.fromarray(data)  # postprocess applies the orientation itself
     elif path.suffix.lower() in (".tif", ".tiff"):
         rgb = load(path).rgb  # 16-bit TIFFs aren't reliably readable by PIL
         im = Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8))
