@@ -17,14 +17,17 @@ import {
   Smile,
   Glasses,
   RotateCcw,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Sun,
-  Moon,
   Lasso,
 } from "lucide-react";
 import {
   BackdropParams,
   EngineError,
   EyesParams,
+  MouthParams,
   SkinParams,
   SkinRegion,
   ModelInfo,
@@ -35,6 +38,7 @@ import {
 } from "./api";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
+import CurveEditor, { IDENTITY, Point } from "./CurveEditor";
 import Slider from "./Slider";
 import Viewer, { Detail, ViewerHandle } from "./Viewer";
 import TitleBar from "./TitleBar";
@@ -45,7 +49,16 @@ interface PhotoSettings {
   outdoor: boolean; // no backdrop step: for portraits not shot on a backdrop
   eyes: EyesParams;
   skin: SkinParams;
+  mouth: MouthParams;
+  dodgeBurn: number; // sculpt strength 0..1
+  creases: number; // clothes crease smoothing 0..1
+  tone: Tone;
 }
+interface Tone {
+  ev: number;
+  curve: Point[]; // luminosity curve
+}
+const TONE_DEFAULTS: Tone = { ev: 0, curve: IDENTITY };
 const sameValues = (a: object, b: object) => JSON.stringify(a) === JSON.stringify(b);
 const sameSettings = (a: PhotoSettings, b: PhotoSettings) => sameValues(a, b);
 
@@ -103,6 +116,7 @@ const EYE_DEFAULTS: EyesParams = {
   iris: 0,
   catchlight: 0,
   veins: 0,
+  lashes: 0,
 };
 
 const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
@@ -141,38 +155,47 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
     label: "Catch light",
     hint: "Brighten and crisp up the existing catchlights (none are added)",
   },
+  {
+    key: "lashes",
+    label: "Eyelashes",
+    hint: "Deepen the lashes and add clarity; the lid skin and brows are left alone",
+  },
 ];
 
 // "compare": holding a panel's before button — the result without that step.
 type View = "result" | "before" | "mask" | "compare";
-type Step = "removals" | "backdrop" | "skin" | "eyes" | "light";
+type Step = "removals" | "tone" | "backdrop" | "clothes" | "skin" | "dodge_burn" | "eyes" | "mouth";
 const STEP_NAMES: Record<Step, string> = {
   removals: "removals",
   backdrop: "backdrop",
   skin: "skin",
   eyes: "eyes",
-  light: "dodge & burn",
+  mouth: "mouth",
+  clothes: "clothes",
+  tone: "tone",
+  dodge_burn: "dodge & burn",
 };
 
-// Brush modes: the Remove panel's (LaMa fill, glasses reflection, patch) and
-// the Dodge & Burn panel's.
-type BrushMode = "fill" | "reflection" | "patch" | "dodge" | "burn";
-const isLight = (m: BrushMode) => m === "dodge" || m === "burn";
+/** A look with one step left out, for that step's hold-for-before view. */
+const withoutStep = (look: Record<string, unknown>, step: Step): Record<string, unknown> =>
+  step === "removals"
+    ? { ...look, [step]: false }
+    : { ...look, [step]: null };
+
+// Brush modes: the Remove panel's (LaMa fill, glasses reflection, patch).
+type BrushMode = "fill" | "reflection" | "patch";
 const BRUSH_COLOURS: Record<BrushMode, string | undefined> = {
   fill: undefined, // PaintOverlay's red
   reflection: "rgba(64, 200, 255, 0.45)",
   patch: undefined,
-  dodge: "rgba(255, 255, 255, 0.35)",
-  burn: "rgba(0, 0, 0, 0.4)",
 };
-const LIGHT_DEFAULTS = { radius: 0.03, strength: 0.4, softness: 0.7 };
-const LIGHT_BRUSH = { min: 0.004, max: 0.15, step: 0.001 };
 
 const SKIN_REGION_DEFAULTS: SkinRegion = {
   blemishes: 0,
   smooth: 0,
   even: 0,
   shine: 0,
+  texture: 0,
   forehead_lines: 0,
   frown_lines: 0,
   smile_lines: 0,
@@ -194,11 +217,26 @@ const SKIN_DEFAULTS: SkinParams = {
   body: SKIN_REGION_DEFAULTS,
 };
 type SkinTab = keyof SkinParams;
+const MOUTH_DEFAULTS: MouthParams = { lip_saturation: 0, lip_smooth: 0, teeth_whiten: 0 };
+const MOUTH_SLIDERS: { key: keyof MouthParams; label: string; hint: string; centred?: boolean }[] = [
+  {
+    key: "lip_saturation",
+    label: "Lip colour",
+    hint: "Left mutes the lips toward the skin's colour, right makes them richer",
+    centred: true,
+  },
+  { key: "lip_smooth", label: "Lip smoothing", hint: "Soften dry lines, flakes and spots on the lips; the sheen is kept" },
+  { key: "teeth_whiten", label: "Teeth whitening", hint: "Take out yellow and brighten the teeth a little; gums and lips are left alone" },
+];
 const ALL_DEFAULTS: PhotoSettings = {
   backdrop: DEFAULTS,
   outdoor: false,
   eyes: EYE_DEFAULTS,
   skin: SKIN_DEFAULTS,
+  mouth: MOUTH_DEFAULTS,
+  dodgeBurn: 0,
+  creases: 0,
+  tone: TONE_DEFAULTS,
 };
 const SKIN_TABS: { key: SkinTab; label: string; ready: boolean }[] = [
   { key: "face", label: "Face", ready: true },
@@ -214,6 +252,12 @@ const SKIN_SLIDERS: {
 }[] = [
   { key: "blemishes", label: "Blemishes", hint: "Heal small spots and marks; skin texture is kept", min: 0 },
   { key: "smooth", label: "Smooth", hint: "Even out blotchy light and shade; pores and fine texture are kept", min: 0 },
+  {
+    key: "texture",
+    label: "Texture",
+    hint: "Soften pores, most visible ones most; the skin's finest grain is kept so it never looks plastic",
+    min: 0,
+  },
   { key: "even", label: "Even tone", hint: "Move red or blotchy patches toward the person's own skin tone", min: 0 },
   {
     key: "shine",
@@ -236,6 +280,14 @@ const RAW_EXTENSIONS = [
 ];
 
 // Brush radius as a fraction of the image's long edge.
+const COLLAPSED_KEY = "rapidretouch.collapsedPanels";
+// Hold-for-before steps in the sidebar's order, top to bottom.
+const PANEL_STEPS: Step[] = ["removals", "tone", "backdrop", "skin", "dodge_burn", "eyes", "mouth", "clothes"];
+const PANEL_IDS = ["remove", "tone", "backdrop", "skin", "dodge_burn", "eyes", "mouth", "clothes"];
+
+// Zoomed in: wait this long after the preview last changed before asking for
+// the sharp full-resolution tile (see the detail effect).
+const DETAIL_AFTER_EDIT_MS = 400;
 const BRUSH = { min: 0.002, max: 0.05, step: 0.001, default: 0.01 };
 const clampBrush = (r: number) => Math.min(BRUSH.max, Math.max(BRUSH.min, r));
 
@@ -282,6 +334,43 @@ function ResetButton({
   );
 }
 
+/** A sidebar panel that folds away to its header. The header is its title
+ * (or ``head``, for a panel whose header is a control) plus ``actions``. */
+function Panel({
+  title,
+  head,
+  actions,
+  open,
+  onToggle,
+  children,
+}: {
+  title?: string;
+  head?: React.ReactNode;
+  actions?: React.ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className={`panel${open ? "" : " panel--collapsed"}`}>
+      <div className="panel__head">
+        <button
+          className="panel__toggle"
+          onClick={onToggle}
+          aria-expanded={open}
+          title={open ? "Collapse" : "Expand"}
+        >
+          <ChevronRight size={14} className="panel__chevron" />
+          {title && <h2>{title}</h2>}
+        </button>
+        {head}
+        {actions}
+      </div>
+      {open && children}
+    </section>
+  );
+}
+
 export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [status, setStatus] = useState("Starting engine…");
@@ -293,6 +382,39 @@ export default function App() {
   const [params, setParams] = useState<BackdropParams>(DEFAULTS);
   const [eyesParams, setEyesParams] = useState<EyesParams>(EYE_DEFAULTS);
   const [skinParams, setSkinParams] = useState<SkinParams>(SKIN_DEFAULTS);
+  const [mouthParams, setMouthParams] = useState<MouthParams>(MOUTH_DEFAULTS);
+  const [dodgeBurn, setDodgeBurn] = useState(0);
+  const [creases, setCreases] = useState(0);
+  // Folded sidebar panels, remembered between sessions.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  const saveCollapsed = (next: Set<string>) => {
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+    } catch {
+      // storage unavailable: folding still works for this session
+    }
+    return next;
+  };
+  const panel = (id: string) => ({
+    open: !collapsed.has(id),
+    onToggle: () =>
+      setCollapsed((c) => {
+        const next = new Set(c);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return saveCollapsed(next);
+      }),
+  });
+  const allCollapsed = PANEL_IDS.every((id) => collapsed.has(id));
+  const toggleAllPanels = () =>
+    setCollapsed(saveCollapsed(allCollapsed ? new Set() : new Set(PANEL_IDS)));
+  const [toneParams, setToneParams] = useState<Tone>(TONE_DEFAULTS);
   const [skinTab, setSkinTab] = useState<SkinTab>("face");
   const [faces, setFaces] = useState<number | null>(null);
   const [maskModel, setMaskModel] = useState<ModelInfo | null>(null);
@@ -307,13 +429,6 @@ export default function App() {
   const [brushMode, setBrushMode] = useState<BrushMode>("fill");
   const [reflectionStrength, setReflectionStrength] = useState(1);
   const [removing, setRemoving] = useState(false);
-  // Dodge & burn: its own brush size (shaping strokes are broad), and the
-  // stroke count of the open photo.
-  const [lightRadius, setLightRadius] = useState(LIGHT_DEFAULTS.radius);
-  const [lightStrength, setLightStrength] = useState(LIGHT_DEFAULTS.strength);
-  const [lightSoftness, setLightSoftness] = useState(LIGHT_DEFAULTS.softness);
-  const [lightStrokes, setLightStrokes] = useState(0);
-  const [lighting, setLighting] = useState(false);
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
   const [maskEdits, setMaskEdits] = useState(0);
   const [maskPending, setMaskPending] = useState(false);
@@ -352,6 +467,10 @@ export default function App() {
   const paramsRef = useRef(params);
   const eyesRef = useRef(eyesParams);
   const skinRef = useRef(skinParams);
+  const mouthRef = useRef(mouthParams);
+  const dodgeBurnRef = useRef(dodgeBurn);
+  const creasesRef = useRef(creases);
+  const toneRef = useRef(toneParams);
   const [outdoor, setOutdoor] = useState(false);
   // Photos whose Backdrop/Outdoor mode was set by detection, not by the user
   // (shown as "auto"); any click on the mode buttons makes it the user's.
@@ -362,6 +481,17 @@ export default function App() {
   const backdropArg = () => (outdoorRef.current ? null : paramsRef.current);
   const inFlight = useRef(false);
   const dirty = useRef(false);
+
+  /** Every tool's settings for an engine call: the photo's whole look. */
+  const lookArgs = (): Record<string, unknown> => ({
+    backdrop: backdropArg(),
+    eyes: eyesRef.current,
+    skin: skinRef.current,
+    mouth: mouthRef.current,
+    dodge_burn: dodgeBurnRef.current > 0 ? { amount: dodgeBurnRef.current } : null,
+    clothes: creasesRef.current > 0 ? { creases: creasesRef.current } : null,
+    tone: sameValues(toneRef.current, TONE_DEFAULTS) ? null : toneRef.current,
+  });
 
   useEffect(() => {
     const unlisten = onEngineEvent((e) => {
@@ -440,7 +570,6 @@ export default function App() {
           setImage({ ...r, path });
           setRemovals(r.removals);
           setMaskEdits(r.mask_edits);
-          setLightStrokes(r.light_strokes);
         }
         saveLastDir(path.replace(/\/[^/]*$/, ""));
         return true;
@@ -468,9 +597,7 @@ export default function App() {
         dirty.current = false;
         const forPath = openedPath.current;
         const r = await call<{ preview: string; faces: number | null }>("render", {
-          backdrop: backdropArg(),
-          eyes: eyesRef.current,
-          skin: skinRef.current,
+          ...lookArgs(),
         });
         // Moved on to another photo meanwhile: don't show this one's result.
         if (forPath !== activePath.current) break;
@@ -535,6 +662,36 @@ export default function App() {
     render();
   };
 
+  const updateMouth = (key: keyof MouthParams, value: number) => {
+    const next = { ...mouthRef.current, [key]: value };
+    mouthRef.current = next;
+    setMouthParams(next);
+    render();
+  };
+  const updateTone = (next: Tone) => {
+    toneRef.current = next;
+    setToneParams(next);
+    render();
+  };
+
+  const updateCreases = (value: number) => {
+    creasesRef.current = value;
+    setCreases(value);
+    render();
+  };
+
+  const updateDodgeBurn = (value: number) => {
+    dodgeBurnRef.current = value;
+    setDodgeBurn(value);
+    render();
+  };
+
+  const resetMouth = () => {
+    mouthRef.current = MOUTH_DEFAULTS;
+    setMouthParams(MOUTH_DEFAULTS);
+    render();
+  };
+
   const updateEyes = (key: keyof EyesParams, value: number) => {
     const next = { ...eyesRef.current, [key]: value };
     eyesRef.current = next;
@@ -551,9 +708,7 @@ export default function App() {
         if (!(await ensureOpen())) return;
         const r = await call<{ preview: string; removals: number }>(method, {
           ...extra,
-          backdrop: backdropArg(),
-          eyes: eyesRef.current,
-          skin: skinRef.current,
+          ...lookArgs(),
         });
         setResult(r.preview);
         setRemovals(r.removals);
@@ -569,51 +724,15 @@ export default function App() {
   );
 
   const onStroke = (points: [number, number][], radius: number) =>
-    isLight(brushMode)
-      ? lightCall("light_paint", {
-          mode: brushMode,
-          points,
-          radius,
-          strength: lightStrength,
-          softness: lightSoftness,
-        })
-      : removalCall(
-          "remove",
-          brushMode === "reflection"
-            ? { points, radius, kind: "reflection", strength: reflectionStrength }
-            : { points, radius },
-        );
+    removalCall(
+      "remove",
+      brushMode === "reflection"
+        ? { points, radius, kind: "reflection", strength: reflectionStrength }
+        : { points, radius },
+    );
 
   const onPatch = (outline: [number, number][], offset: [number, number]) =>
     removalCall("remove", { points: outline, radius: 0, kind: "patch", offset });
-
-  // Dodge & burn calls return the whole pipeline's preview, like removals.
-  const lightCall = useCallback(
-    async (method: string, extra: Record<string, unknown> = {}) => {
-      setLighting(true);
-      setBusy(true);
-      try {
-        if (!(await ensureOpen())) return;
-        const r = await call<{ preview: string; light_strokes: number }>(method, {
-          ...extra,
-          backdrop: backdropArg(),
-          eyes: eyesRef.current,
-          skin: skinRef.current,
-        });
-        setResult(r.preview);
-        setLightStrokes(r.light_strokes);
-        setStatus("Ready");
-      } catch (e) {
-        handleError(e);
-      } finally {
-        setLighting(false);
-        setBusy(false);
-      }
-    },
-    [handleError, ensureOpen],
-  );
-  const undoLight = () => lightCall("undo_light");
-  const clearLight = () => lightCall("clear_light");
 
   // The tool buttons pick the brush mode; clicking the active one turns it off.
   const pickBrush = (mode: BrushMode) => {
@@ -632,13 +751,12 @@ export default function App() {
         e.preventDefault();
         if (view === "mask") {
           if (maskEdits > 0 && !maskPending) undoMaskEdit();
-        } else if (isLight(brushMode) && brushOn) {
-          if (lightStrokes > 0 && !lighting) undoLight();
         } else if (removals > 0 && !removing) undoRemove();
+      } else if (e.key === "\\" && view !== "mask") {
+        e.preventDefault();
+        setView((v) => (v === "before" ? "result" : "before"));
       } else if (view === "mask" && (e.key === "x" || e.key === "X")) {
         setMaskMode((m) => (m === "add" ? "subtract" : "add"));
-      } else if (isLight(brushMode) && (e.key === "x" || e.key === "X")) {
-        setBrushMode((m) => (m === "dodge" ? "burn" : "dodge"));
       } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
         e.preventDefault();
         viewerRef.current?.fit();
@@ -663,12 +781,8 @@ export default function App() {
       } else if (e.key === "[" || e.key === "]") {
         // Resize whichever brush is in use.
         const factor = e.key === "]" ? 1.2 : 1 / 1.2;
-        if (view !== "mask" && isLight(brushMode)) {
-          setLightRadius((r) => Math.min(LIGHT_BRUSH.max, Math.max(LIGHT_BRUSH.min, r * factor)));
-        } else {
-          const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
-          setRadius((r) => clampBrush(r * factor));
-        }
+        const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
+        setRadius((r) => clampBrush(r * factor));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -680,6 +794,10 @@ export default function App() {
     outdoor: outdoorRef.current,
     eyes: eyesRef.current,
     skin: skinRef.current,
+    mouth: mouthRef.current,
+    dodgeBurn: dodgeBurnRef.current,
+    creases: creasesRef.current,
+    tone: toneRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
@@ -691,6 +809,14 @@ export default function App() {
     setSkinParams(st.skin);
     setParams(st.backdrop);
     setEyesParams(st.eyes);
+    mouthRef.current = st.mouth;
+    setMouthParams(st.mouth);
+    dodgeBurnRef.current = st.dodgeBurn;
+    setDodgeBurn(st.dodgeBurn);
+    creasesRef.current = st.creases;
+    setCreases(st.creases);
+    toneRef.current = st.tone;
+    setToneParams(st.tone);
   };
 
   const markEdited = (path: string, st: PhotoSettings) =>
@@ -722,7 +848,6 @@ export default function App() {
     setFaces(null);
     setRemovals(0);
     setMaskEdits(0);
-    setLightStrokes(0);
     const saved = settingsByPath.current.get(path);
     applySettings(saved ?? ALL_DEFAULTS);
     setModeIsAuto(autoMode.current.has(path));
@@ -732,7 +857,6 @@ export default function App() {
       setImage(openedInfo.current);
       setRemovals(openedInfo.current.removals);
       setMaskEdits(openedInfo.current.mask_edits);
-      setLightStrokes(openedInfo.current.light_strokes);
       render();
       return;
     }
@@ -756,7 +880,6 @@ export default function App() {
         preview: q.image,
         removals: 0,
         mask_edits: 0,
-        light_strokes: 0,
       });
     } catch (e) {
       handleError(e);
@@ -926,24 +1049,66 @@ export default function App() {
   // Each panel's hold-for-before shows everything except that panel's step, so
   // each edit can be judged on its own. Releasing before the render returns
   // must not leave the comparison showing, hence the token.
+  // Before views are rendered ahead on hover and remembered until the photo
+  // or its settings change, so pressing shows them at once. Requests are
+  // shared: pressing while the hover render is still running waits for it.
+  const compareCache = useRef(new Map<string, Promise<string>>());
+  const beforeView = (step: Step): Promise<string> => {
+    const args = withoutStep(lookArgs(), step);
+    const key = `${openedPath.current}|${JSON.stringify(args)}`;
+    let pending = compareCache.current.get(key);
+    if (!pending) {
+      pending = call<{ preview: string }>("render", args).then((r) => r.preview);
+      pending.catch(() => compareCache.current.delete(key));
+      compareCache.current.set(key, pending);
+    }
+    return pending;
+  };
+  const prefetchWithout = (step: Step) => {
+    // Only when idle and open: never queue ahead of a slider's own render.
+    if (inFlight.current || !activePath.current || openedPath.current !== activePath.current) return;
+    beforeView(step).catch(() => undefined);
+  };
+  // Which panels have edits to compare, in the sidebar's top-to-bottom order.
+  const stepIsEdited = (step: Step): boolean => {
+    switch (step) {
+      case "removals":
+        return removals > 0;
+      case "tone":
+        return !sameValues(toneRef.current, TONE_DEFAULTS);
+      case "backdrop":
+        return !outdoorRef.current;
+      case "skin":
+        return !sameValues(skinRef.current, SKIN_DEFAULTS);
+      case "dodge_burn":
+        return dodgeBurnRef.current > 0;
+      case "eyes":
+        return !sameValues(eyesRef.current, EYE_DEFAULTS);
+      case "mouth":
+        return !sameValues(mouthRef.current, MOUTH_DEFAULTS);
+      case "clothes":
+        return creasesRef.current > 0;
+    }
+  };
   const holdWithout = async (step: Step) => {
     const token = ++compareToken.current;
     setCompareStep(step);
     setView("compare");
     try {
       if (!(await ensureOpen())) return;
-      const r = await call<{ preview: string }>("render", {
-        backdrop: step === "backdrop" ? null : backdropArg(),
-        eyes: step === "eyes" ? null : eyesRef.current,
-        skin: step === "skin" ? null : skinRef.current,
-        removals: step !== "removals",
-        light: step !== "light",
-      });
-      if (token === compareToken.current) setCompareImg(r.preview);
+      const preview = await beforeView(step);
+      if (token === compareToken.current) setCompareImg(preview);
+      // Photographers tend to check panels top to bottom: get the next edited
+      // panel's before view ready while this one is being looked at.
+      const next = PANEL_STEPS.slice(PANEL_STEPS.indexOf(step) + 1).find(stepIsEdited);
+      if (next) beforeView(next).catch(() => undefined);
     } catch (e) {
       handleError(e);
     }
   };
+  useEffect(() => {
+    compareCache.current.clear();
+  }, [result]);
   const releaseCompare = () => {
     compareToken.current++;
     setCompareImg(null);
@@ -955,19 +1120,9 @@ export default function App() {
   // that view's render arguments, and a tile for anything else is dropped.
   const detailArgs = (): Record<string, unknown> | null => {
     if (view === "mask") return null;
-    if (view === "before") return { backdrop: null, eyes: null, removals: false, light: false };
-    const all = {
-      backdrop: backdropArg(),
-      eyes: eyesRef.current,
-      skin: skinRef.current,
-      removals: true,
-    };
-    if (view === "compare" && compareStep === "skin") return { ...all, skin: null };
-    if (view === "compare" && compareStep === "backdrop") return { ...all, backdrop: null };
-    if (view === "compare" && compareStep === "eyes") return { ...all, eyes: null };
-    if (view === "compare" && compareStep === "removals") return { ...all, removals: false };
-    if (view === "compare" && compareStep === "light") return { ...all, light: false };
-    return all;
+    if (view === "before") return { removals: false };
+    if (view === "compare" && compareStep) return withoutStep(lookArgs(), compareStep);
+    return lookArgs();
   };
   const detailArgsRef = useRef(detailArgs);
   detailArgsRef.current = detailArgs;
@@ -1016,11 +1171,25 @@ export default function App() {
     [requestDetail],
   );
 
-  // Whenever the picture changes, the old tile is stale: drop it and re-ask.
+  // Whenever the picture changes, the old tile is stale: drop it and re-ask,
+  // but only once the sliders have been still for a moment. The engine does
+  // one thing at a time, so a full-resolution tile asked for mid-drag would
+  // hold up the next preview and make the slider lag.
+  const detailTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
     contentVersion.current++;
     setDetail(null);
-    if (wantedRegion.current) requestDetail();
+    window.clearTimeout(detailTimer.current);
+    if (!wantedRegion.current) return;
+    const ask = () => {
+      if (inFlight.current || dirty.current) {
+        detailTimer.current = window.setTimeout(ask, DETAIL_AFTER_EDIT_MS);
+      } else {
+        requestDetail();
+      }
+    };
+    detailTimer.current = window.setTimeout(ask, DETAIL_AFTER_EDIT_MS);
+    return () => window.clearTimeout(detailTimer.current);
   }, [result, compareImg, view, compareStep, requestDetail]);
 
   const exportImage = async () => {
@@ -1035,9 +1204,7 @@ export default function App() {
     try {
       const r = await call<{ path: string }>("export", {
         path,
-        backdrop: backdropArg(),
-        eyes: eyesRef.current,
-        skin: skinRef.current,
+        ...lookArgs(),
       });
       setStatus(`Exported ${r.path.split("/").pop()}`);
     } catch (e) {
@@ -1157,8 +1324,8 @@ export default function App() {
                 <PaintOverlay
                   image={imgEl}
                   active={brushOn && !panning && !zoomTool}
-                  radius={isLight(brushMode) ? lightRadius : brushRadius}
-                  pending={isLight(brushMode) ? lighting : removing}
+                  radius={brushRadius}
+                  pending={removing}
                   onStroke={onStroke}
                   colour={BRUSH_COLOURS[brushMode]}
                 />
@@ -1185,6 +1352,22 @@ export default function App() {
           )}
         </Viewer>
         {view === "before" && <div className="viewer__badge">Original</div>}
+        {image && view !== "mask" && (
+          <div className="tabs before-after" title="Before / after (\ key)">
+            <button
+              className={view === "before" ? "active" : ""}
+              onClick={() => setView("before")}
+            >
+              Before
+            </button>
+            <button
+              className={view !== "before" ? "active" : ""}
+              onClick={() => setView("result")}
+            >
+              After
+            </button>
+          </div>
+        )}
         {view === "compare" && compareImg && (
           <div className="viewer__badge">Before · {compareStep && STEP_NAMES[compareStep]}</div>
         )}
@@ -1196,8 +1379,17 @@ export default function App() {
       </main>
 
       <aside className="sidebar">
-        <section className="panel">
-          <h2>Remove</h2>
+        <div className="sidebar__bar">
+          <button
+            className="sidebar__fold"
+            onClick={toggleAllPanels}
+            title={allCollapsed ? "Expand all panels" : "Collapse all panels"}
+          >
+            {allCollapsed ? <ChevronsUpDown size={14} /> : <ChevronsDownUp size={14} />}
+            {allCollapsed ? "Expand all" : "Collapse all"}
+          </button>
+        </div>
+        <Panel title="Remove" {...panel("remove")}>
           <div className="panel__buttons">
             <button
               disabled={!image}
@@ -1241,6 +1433,7 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={!image || removals === 0 || removing || view === "mask"}
+              onPointerEnter={() => prefetchWithout("removals")}
               onPointerDown={() => holdWithout("removals")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
@@ -1285,10 +1478,53 @@ export default function App() {
                 ? `${removals} removal${removals === 1 ? "" : "s"} · LaMa · Apache-2.0`
                 : "Paint over a distraction; it's filled when you let go. Fill: LaMa · Apache-2.0"}
           </p>
-        </section>
+        </Panel>
 
-        <section className="panel">
-          <div className="panel__head">
+        <Panel
+          title="Tone"
+          actions={
+            <ResetButton
+              disabled={!image || sameValues(toneParams, TONE_DEFAULTS)}
+              onClick={() => updateTone(TONE_DEFAULTS)}
+              what="Tone"
+            />
+          }
+          {...panel("tone")}
+        >
+          <Slider
+            label="Exposure"
+            hint="Brighten or darken the whole photo, in stops (EV)"
+            min={-2}
+            max={2}
+            step={0.05}
+            centred
+            value={toneParams.ev}
+            defaultValue={0}
+            format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)} EV`}
+            disabled={!image}
+            onChange={(v) => updateTone({ ...toneRef.current, ev: v })}
+          />
+          <CurveEditor
+            points={toneParams.curve}
+            disabled={!image}
+            onChange={(curve) => updateTone({ ...toneRef.current, curve })}
+          />
+          <div className="panel__buttons">
+            <button
+              disabled={!image || view === "mask" || sameValues(toneParams, TONE_DEFAULTS)}
+              onPointerEnter={() => prefetchWithout("tone")}
+              onPointerDown={() => holdWithout("tone")}
+              onPointerUp={releaseCompare}
+              onPointerLeave={releaseCompare}
+              title="Hold to see the photo without the exposure and curves"
+            >
+              <Eye size={15} /> Hold for before
+            </button>
+          </div>
+        </Panel>
+
+        <Panel
+          head={
             <div className="tabs panel__modes">
               <button
                 className={!outdoor ? "active" : ""}
@@ -1309,12 +1545,16 @@ export default function App() {
                 {outdoor && modeIsAuto && <span className="auto-tag">auto</span>}
               </button>
             </div>
+          }
+          actions={
             <ResetButton
               disabled={!image || sameValues(params, DEFAULTS)}
               onClick={resetBackdrop}
               what="Backdrop"
             />
-          </div>
+          }
+          {...panel("backdrop")}
+        >
           {SLIDERS.map((s) => (
             <Slider
               key={s.key}
@@ -1333,6 +1573,7 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={!image || view === "mask" || outdoor}
+              onPointerEnter={() => prefetchWithout("backdrop")}
               onPointerDown={() => holdWithout("backdrop")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
@@ -1408,17 +1649,19 @@ export default function App() {
               </p>
             )
           )}
-        </section>
+        </Panel>
 
-        <section className="panel">
-          <div className="panel__head">
-            <h2>Skin</h2>
+        <Panel
+          title="Skin"
+          actions={
             <ResetButton
               disabled={!image || sameValues(skinParams, SKIN_DEFAULTS)}
               onClick={resetSkin}
               what="Skin (Face, Neck and Body)"
             />
-          </div>
+          }
+          {...panel("skin")}
+        >
           <div className="tabs">
             {SKIN_TABS.map((t) => (
               <button
@@ -1485,6 +1728,7 @@ export default function App() {
                 view === "mask" ||
                 Object.values(skinParams).every((r) => Object.values(r).every((v) => v === 0))
               }
+              onPointerEnter={() => prefetchWithout("skin")}
               onPointerDown={() => holdWithout("skin")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
@@ -1497,17 +1741,48 @@ export default function App() {
             Facial hair, eyes, brows and lips are left alone automatically. Eye wrinkles and crow's
             feet are in the Eyes panel. Neck and Body are coming next.
           </p>
-        </section>
+        </Panel>
 
-        <section className="panel">
-          <div className="panel__head">
-            <h2>Eyes</h2>
+        <Panel title="Dodge & Burn" {...panel("dodge_burn")}>
+          <Slider
+            label="Sculpt"
+            hint="Brighten the forehead, nose bridge, cheekbones and chin, and deepen the contours under the cheekbones and around the face"
+            min={0}
+            max={1}
+            step={0.01}
+            value={dodgeBurn}
+            defaultValue={0}
+            disabled={!image}
+            onChange={updateDodgeBurn}
+          />
+          <div className="panel__buttons">
+            <button
+              disabled={!image || view === "mask" || dodgeBurn === 0}
+              onPointerEnter={() => prefetchWithout("dodge_burn")}
+              onPointerDown={() => holdWithout("dodge_burn")}
+              onPointerUp={releaseCompare}
+              onPointerLeave={releaseCompare}
+              title="Hold to see the photo without dodge & burn"
+            >
+              <Eye size={15} /> Hold for before
+            </button>
+          </div>
+          <p className="panel__model">
+            Adds shape: brighter high points, deeper contours. Skin texture and colour are kept.
+          </p>
+        </Panel>
+
+        <Panel
+          title="Eyes"
+          actions={
             <ResetButton
               disabled={!image || sameValues(eyesParams, EYE_DEFAULTS)}
               onClick={resetEyes}
               what="Eyes"
             />
-          </div>
+          }
+          {...panel("eyes")}
+        >
           {EYE_SLIDERS.map((s) => (
             <Slider
               key={s.key}
@@ -1527,6 +1802,7 @@ export default function App() {
               disabled={
                 !image || view === "mask" || Object.values(eyesParams).every((v) => v <= 0)
               }
+              onPointerEnter={() => prefetchWithout("eyes")}
               onPointerDown={() => holdWithout("eyes")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
@@ -1542,93 +1818,79 @@ export default function App() {
                 ? `${faces} face${faces === 1 ? "" : "s"} · MediaPipe Face Landmarker · Apache-2.0`
                 : "Faces are found when you first move a slider. MediaPipe · Apache-2.0"}
           </p>
-        </section>
+        </Panel>
 
-        <section className="panel">
-          <h2>Dodge &amp; Burn</h2>
+        <Panel
+          title="Mouth"
+          actions={
+            <ResetButton
+              disabled={!image || sameValues(mouthParams, MOUTH_DEFAULTS)}
+              onClick={resetMouth}
+              what="Mouth"
+            />
+          }
+          {...panel("mouth")}
+        >
+          {MOUTH_SLIDERS.map((s) => (
+            <Slider
+              key={s.key}
+              label={s.label}
+              hint={s.hint}
+              min={s.centred ? -1 : 0}
+              max={1}
+              step={0.01}
+              centred={s.centred}
+              value={mouthParams[s.key]}
+              defaultValue={MOUTH_DEFAULTS[s.key]}
+              format={s.centred ? (v) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2)) : undefined}
+              disabled={!image}
+              onChange={(v) => updateMouth(s.key, v)}
+            />
+          ))}
           <div className="panel__buttons">
             <button
-              disabled={!image}
-              onClick={() => pickBrush("dodge")}
-              className={brushOn && brushMode === "dodge" ? "active" : ""}
-              title="Dodge: paint to lighten (X swaps with Burn)"
-            >
-              <Sun size={15} /> Dodge
-            </button>
-            <button
-              disabled={!image}
-              onClick={() => pickBrush("burn")}
-              className={brushOn && brushMode === "burn" ? "active" : ""}
-              title="Burn: paint to darken (X swaps with Dodge)"
-            >
-              <Moon size={15} /> Burn
-            </button>
-            <button
-              disabled={!image || lightStrokes === 0 || lighting}
-              onClick={undoLight}
-              title="Undo the last dodge or burn stroke (Ctrl+Z while the brush is on)"
-            >
-              <Undo2 size={15} /> Undo
-            </button>
-            <button
-              disabled={!image || lightStrokes === 0 || lighting}
-              onClick={clearLight}
-              title="Remove every dodge and burn stroke"
-            >
-              <Trash2 size={15} /> Clear
-            </button>
-          </div>
-          <div className="panel__buttons">
-            <button
-              disabled={!image || lightStrokes === 0 || lighting || view === "mask"}
-              onPointerDown={() => holdWithout("light")}
+              disabled={!image || view === "mask" || sameValues(mouthParams, MOUTH_DEFAULTS)}
+              onPointerEnter={() => prefetchWithout("mouth")}
+              onPointerDown={() => holdWithout("mouth")}
               onPointerUp={releaseCompare}
               onPointerLeave={releaseCompare}
-              title="Hold to see the photo without dodge & burn"
+              title="Hold to see the photo without the mouth edits"
             >
               <Eye size={15} /> Hold for before
             </button>
           </div>
+        </Panel>
+
+        <Panel title="Clothes" {...panel("clothes")}>
           <Slider
-            label="Brush size"
-            hint="Brush size ([ and ] keys)"
-            min={LIGHT_BRUSH.min}
-            max={LIGHT_BRUSH.max}
-            step={LIGHT_BRUSH.step}
-            value={lightRadius}
-            defaultValue={LIGHT_DEFAULTS.radius}
-            format={(v) => (v * 100).toFixed(1)}
-            disabled={!image}
-            onChange={setLightRadius}
-          />
-          <Slider
-            label="Strength"
-            hint="How much each stroke lightens or darkens; overlapping strokes build up"
-            min={0.05}
-            max={1}
-            step={0.05}
-            value={lightStrength}
-            defaultValue={LIGHT_DEFAULTS.strength}
-            disabled={!image}
-            onChange={setLightStrength}
-          />
-          <Slider
-            label="Softness"
-            hint="How gradually the stroke fades out at its edge"
+            label="Fine creases"
+            hint="Smooth fine creases and wrinkles in the clothes, found automatically; the weave, seams, prints and the garment's shape are kept"
             min={0}
             max={1}
-            step={0.05}
-            value={lightSoftness}
-            defaultValue={LIGHT_DEFAULTS.softness}
+            step={0.01}
+            value={creases}
+            defaultValue={0}
             disabled={!image}
-            onChange={setLightSoftness}
+            onChange={updateCreases}
           />
+          <div className="panel__buttons">
+            <button
+              disabled={!image || view === "mask" || creases === 0}
+              onPointerEnter={() => prefetchWithout("clothes")}
+              onPointerDown={() => holdWithout("clothes")}
+              onPointerUp={releaseCompare}
+              onPointerLeave={releaseCompare}
+              title="Hold to see the photo without crease smoothing"
+            >
+              <Eye size={15} /> Hold for before
+            </button>
+          </div>
           <p className="panel__model">
-            {lightStrokes > 0
-              ? `${lightStrokes} stroke${lightStrokes === 1 ? "" : "s"} · X swaps dodge and burn`
-              : "Paint light and shade to shape the face. Low strength and several passes look most natural. X swaps dodge and burn."}
+            Clothes are found automatically: the subject, minus skin and head. Smooths fine creases on plain fabric;
+            thick folds are part of the garment's shape and are kept (use Patch for one that needs to go).
           </p>
-        </section>
+        </Panel>
+
       </aside>
 
 
@@ -1640,7 +1902,7 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams },
+                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams },
                     ALL_DEFAULTS,
                   ),
                 }

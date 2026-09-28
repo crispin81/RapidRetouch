@@ -39,7 +39,7 @@ import cv2
 import numpy as np
 
 from .colour import linear_to_srgb, srgb_to_linear
-from .filters import masked_blur
+from .filters import blur, grow_mask, masked_blur, max_filter
 
 # MediaPipe Face Mesh indices, each curve listed outer corner -> inner corner.
 EYES = {
@@ -117,9 +117,15 @@ CREASE_FOLD_KEEP = 0.15  # removing this line is the point, so little is kept
 # Eye whites, iris and catchlights. Distances in eye widths, lightness in Lab L.
 LID_MARGIN = 0.03  # stay this far inside the lids (lashes, lid shadow)
 CARUNCLE_CLEAR = (0.06, 0.14)  # fade out toward the pink inner corner
-WHITES_DESATURATE = 0.6  # share of the whites' colour cast removed at full
-WHITES_TARGET_L = 92.0
-WHITES_MAX_LIFT = 12.0
+WHITES_DESATURATE = 1.0  # share of the whites' colour cast removed at full
+WHITES_SKIN_SHARE = 0.3  # whites are aimed at this share of the nearby skin's colour:
+# a white lit by the same light, where plain neutral reads blue-grey beside skin
+WHITES_TARGET_L = 95.0
+WHITES_LIFT = 0.55  # share of the way to WHITES_TARGET_L lifted at full
+WHITES_MAX_LIFT = 25.0
+WHITES_STRENGTH = 0.5  # overall scale of the slider (halved at the user's request)
+WHITES_FEATHER = 0.04  # eye widths: the whites edit fades out toward lids, iris and corners
+WHITES_NOT_LASH = (0.3, 0.7)  # share of this eye's bright white: darker is lashes, not white
 VEIN_SCALES = (0.006, 0.012)  # vein half-widths the detector looks for
 VEIN_LOW, VEIN_HIGH = 0.4, 1.5  # redness-line strength ramp (Lab a units)
 VEIN_MIN_RED = (2.0, 6.0)  # how much redder than the white around it
@@ -130,9 +136,17 @@ IRIS_DETAIL_GAIN = 0.8
 IRIS_DETAIL_CLIP = 6.0  # Lab L
 IRIS_SATURATION = 0.6
 IRIS_MAX_LIFT = 8.0
+LASH_REACH = 0.14  # eye widths: lashes reach this far out from the lid line
+LASH_INSIDE = 0.03  # and start this far inside it (the lash roots on the lid rim)
+LASH_CONTEXT = 0.05  # the lid skin a lash is darker than
+LASH_DARK = (3.0, 12.0)  # Lab L darker than the skin around: lid texture -> lash
+LASH_DETAIL = 0.02  # eye widths: clarity works on detail finer than this
+LASH_CLARITY = 1.2
+LASH_DEEPEN = 0.4
 CATCH_SIGMA = 0.08  # surroundings a catchlight stands out from
-CATCH_EXCESS = (8.0, 25.0)  # how much brighter than surroundings to count
-CATCH_BOOST = 0.8
+CATCH_EXCESS = (6.0, 18.0)  # how much brighter than surroundings to count
+CATCH_BOOST = 1.6
+CATCH_MIN_L = (45.0, 70.0)  # Lab L: dimmer spots aren't catchlights
 
 MAX_LIFT = 20.0  # Lab L units
 MAX_COLOUR_SHIFT = 15.0  # Lab a/b units
@@ -151,6 +165,7 @@ class Params:
     iris: float = 0.0
     catchlight: float = 0.0
     veins: float = 0.0
+    lashes: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict) -> "Params":
@@ -167,6 +182,7 @@ class Params:
                 self.iris,
                 self.catchlight,
                 self.veins,
+                self.lashes,
             )
         )
 
@@ -186,7 +202,7 @@ def _poly_mask(shape, poly: np.ndarray) -> np.ndarray:
 
 def _inner_feather(hard: np.ndarray, sigma: float) -> np.ndarray:
     """Soft mask that is exactly zero at the polygon edge and ramps up inside it."""
-    soft = cv2.GaussianBlur(hard, (0, 0), max(0.5, sigma))
+    soft = blur(hard, max(0.5, sigma))
     return np.clip((soft - 0.5) * 2, 0, 1) * hard
 
 
@@ -279,7 +295,7 @@ def _line_strength(
     strength = np.zeros_like(L)
     for scale in scales:
         sigma = max(0.7, scale * eye_w)
-        g = cv2.GaussianBlur(L, (0, 0), sigma)
+        g = blur(L, sigma)
         gy, gx = np.gradient(g)
         gxy, gxx = np.gradient(gx)
         gyy, _ = np.gradient(gy)
@@ -304,19 +320,19 @@ def _wrinkle_lift(
     # Closing removes dark features narrower than the kernel: the skin as it
     # would be without the line. Pores are filled too, but only lines are used.
     filled = cv2.morphologyEx(L, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    filled = cv2.GaussianBlur(filled, (0, 0), max(0.5, 0.5 * s_max))
+    filled = blur(filled, max(0.5, 0.5 * s_max))
     # The lift is kept smooth at pore scale, so pores inside a line still show
     # through it instead of being filled in along with the line.
     depth = np.clip(filled - L, 0, None)
-    depth = cv2.GaussianBlur(depth, (0, 0), max(0.5, 0.6 * scales[0] * eye_w))
+    depth = blur(depth, max(0.5, 0.6 * scales[0] * eye_w))
     weight = _smoothstep(_line_strength(L, eye_w, scales), LINE_LOW, LINE_HIGH)
     kd = 2 * round(1.5 * s_max) + 1
-    weight = cv2.dilate(weight, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kd, kd)))
-    weight = cv2.GaussianBlur(weight, (0, 0), s_max)
+    weight = max_filter(weight, kd)
+    weight = blur(weight, s_max)
     # How deep the line is around each pixel, so a fold is judged as a whole.
     kf = 2 * round(3 * s_max) + 1
-    near = cv2.dilate(depth, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kf, kf)))
-    near = cv2.GaussianBlur(near, (0, 0), s_max)
+    near = max_filter(depth, kf)
+    near = blur(near, s_max)
     fold = 1 - fold_keep * _smoothstep(near, FOLD_LOW, FOLD_HIGH)
     not_hair = 1 - _smoothstep(depth, TOO_DARK_LOW, TOO_DARK_HIGH)
     return depth * weight * fold * not_hair * zone
@@ -395,8 +411,8 @@ def _remove_veins(lab: np.ndarray, sclera: np.ndarray, eye_w: float, amount: flo
     redder = _smoothstep(a - local_a, *VEIN_MIN_RED)
     vein = line * redder * hard
     k = 2 * round(max(1.0, VEIN_SCALES[-1] * eye_w)) + 1
-    vein = cv2.dilate(vein, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    vein = np.clip(cv2.GaussianBlur(vein, (0, 0), max(0.5, VEIN_SCALES[0] * eye_w)), 0, 1)
+    vein = max_filter(vein, k)
+    vein = np.clip(blur(vein, max(0.5, VEIN_SCALES[0] * eye_w)), 0, 1)
     clean = masked_blur(lab, hard * (1 - vein) ** 2, max(0.7, VEIN_REFERENCE * eye_w))
     target = clean - lab
     target[..., 0] = np.clip(target[..., 0], 0, None)  # only ever brighten
@@ -418,14 +434,14 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
 
     # Catchlights first, from the untouched pixels: small spots much brighter
     # than their surroundings. They're shielded from the whites/iris edits.
-    around = cv2.GaussianBlur(L, (0, 0), max(0.7, CATCH_SIGMA * eye_w))
+    around = blur(L, max(0.7, CATCH_SIGMA * eye_w))
     excess = L - around
     catch = (
         _smoothstep(excess, *CATCH_EXCESS)
-        * _smoothstep(L, 55.0, 80.0)
+        * _smoothstep(L, *CATCH_MIN_L)
         * cv2.dilate(opening_hard, np.ones((3, 3), np.uint8))
     )
-    catch = np.clip(cv2.GaussianBlur(catch, (0, 0), max(0.5, 0.01 * eye_w)) * 1.5, 0, 1)
+    catch = np.clip(blur(catch, max(0.5, 0.01 * eye_w)) * 1.5, 0, 1)
 
     # The white of the eye: the opening minus the iris and the pink inner corner.
     ic = geo["inner_corner"] - off
@@ -437,11 +453,21 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
         _remove_veins(lab, sclera, eye_w, p.veins)
 
     if p.whites > 0:
-        s = p.whites * sclera
+        s = WHITES_STRENGTH * p.whites * blur(sclera, max(0.5, WHITES_FEATHER * eye_w)) * opening
         Lw = lab[..., 0].copy()
-        lab[..., 1:] *= (1 - WHITES_DESATURATE * s)[..., None]
-        lift = np.clip((WHITES_TARGET_L - Lw) * 0.25, 0, WHITES_MAX_LIFT)
-        lab[..., 0] += s * _smoothstep(Lw, 35.0, 65.0) * lift  # not lashes or shadow
+        # The skin around the eye (outside the opening, not lashes or shadow)
+        # carries the light's colour.
+        around = (opening_hard < 0.5) & (L > 45)
+        skin_ab = np.median(lab[around][:, 1:], axis=0) if around.sum() > 50 else np.zeros(2)
+        target_ab = (WHITES_SKIN_SHARE * skin_ab).astype(np.float32)
+        lab[..., 1:] += (WHITES_DESATURATE * s)[..., None] * (target_ab - lab[..., 1:])
+        lift = np.clip((WHITES_TARGET_L - Lw) * WHITES_LIFT, 0, WHITES_MAX_LIFT)
+        # Lashes are told apart by being much darker than this eye's own white,
+        # not by a fixed level: the shaded side of a white can be darker than a
+        # lash on a brighter photo.
+        white_L = np.percentile(Lw[sclera > 0.5], 85) if (sclera > 0.5).sum() > 20 else 60.0
+        not_lash = _smoothstep(Lw, WHITES_NOT_LASH[0] * white_L, WHITES_NOT_LASH[1] * white_L)
+        lab[..., 0] += s * not_lash * lift
 
     if p.iris > 0:
         pupil_r = _pupil_radius(L, d, r, opening_hard)
@@ -449,8 +475,8 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
         inner_iris = np.clip((IRIS_EDGE_KEEP * r - d) / max(0.5, 0.1 * r) + 0.5, 0, 1)
         W = iris_disk * inner_iris * opening * (1 - pupil) * (1 - catch)
         s = p.iris * W
-        fine = cv2.GaussianBlur(L, (0, 0), max(0.5, IRIS_DETAIL[0] * eye_w))
-        coarse = cv2.GaussianBlur(L, (0, 0), max(0.7, IRIS_DETAIL[1] * eye_w))
+        fine = blur(L, max(0.5, IRIS_DETAIL[0] * eye_w))
+        coarse = blur(L, max(0.7, IRIS_DETAIL[1] * eye_w))
         # Detail clipped: a strong edge (iris against the white) must never turn
         # into a bright ring, whatever the landmarks say.
         detail = np.clip(fine - coarse, -IRIS_DETAIL_CLIP, IRIS_DETAIL_CLIP)
@@ -465,6 +491,31 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
         lab[..., 1:] *= (1 - 0.5 * s)[..., None]  # crisp, neutral highlights
 
     lab[..., 0] = np.clip(lab[..., 0], 0, 100)
+
+
+def _lashes(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, amount: float) -> None:
+    """Deepen and crisp up the lashes, in place on the eye crop's Lab.
+
+    Lashes grow in a band along the lid line, reaching out from it; within the
+    band they're told from lid skin by being dark lines against it, so the
+    skin's own texture isn't sharpened."""
+    shape = lab.shape[:2]
+    opening = _poly_mask(shape, geo["contour"] - off)
+    outer = grow_mask(opening, 2 * round(LASH_REACH * eye_w) + 1)
+    inner = 1 - grow_mask(1 - opening, 2 * round(LASH_INSIDE * eye_w) + 1)  # eroded
+    band = blur(np.clip(outer - inner, 0, 1), max(0.5, 0.03 * eye_w))
+    L = np.ascontiguousarray(lab[..., 0])
+    around = blur(L, max(0.7, LASH_CONTEXT * eye_w))
+    dark = np.clip(around - L, 0, None)
+    lash = _smoothstep(dark, *LASH_DARK) * band
+    lash = np.clip(blur(lash, max(0.5, 0.006 * eye_w)) * 1.5, 0, 1)
+    # Clarity: fine local contrast; and the lashes themselves deepened.
+    detail = L - blur(L, max(0.5, LASH_DETAIL * eye_w))
+    lab[..., 0] = np.clip(
+        L + amount * lash * (LASH_CLARITY * detail - LASH_DEEPEN * dark), 0, 100
+    )
+    # Deepened lashes keep a neutral dark, not a coloured one.
+    lab[..., 1:] *= (1 - 0.3 * amount * lash)[..., None]
 
 
 def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
@@ -483,20 +534,14 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
     lab = cv2.cvtColor(np.clip(crop, 0, 1), cv2.COLOR_RGB2Lab)
 
     below = _below_lid(shape, geo["lid"] - off, eye_w)
-    eye_hole = cv2.dilate(
-        _poly_mask(shape, geo["contour"] - off),
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * round(0.12 * eye_w) + 1,) * 2),
-    )
+    eye_hole = grow_mask(_poly_mask(shape, geo["contour"] - off), 2 * round(0.12 * eye_w) + 1)
     skin_below = below * (1 - eye_hole)
 
     # Wrinkles first, while the fine detail is still exactly as shot.
     if p.wrinkles > 0:
         face = _poly_mask(shape, geo["face"] - off)
         kb = 2 * round(BROW_CLEARANCE * eye_w) + 1
-        brow = cv2.dilate(
-            _poly_mask(shape, cv2.convexHull(geo["brow"] - off)[:, 0]),
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kb, kb)),
-        )
+        brow = grow_mask(_poly_mask(shape, cv2.convexHull(geo["brow"] - off)[:, 0]), kb)
         zone = np.maximum(
             _poly_mask(shape, geo["under_eye_lines"] - off),
             _poly_mask(shape, geo["crows_feet"] - off),
@@ -508,9 +553,9 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
     if p.dark_circles > 0:
         zone = _poly_mask(shape, geo["dark_circle"] - off)
         k = 2 * round(SURROUND * eye_w) + 1
-        near = cv2.dilate(zone, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        near = grow_mask(zone, k)
         k2 = 2 * round(0.05 * eye_w) + 1
-        gap = cv2.dilate(zone, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2)))
+        gap = grow_mask(zone, k2)
         ring = near * (1 - gap) * skin_below
         if ring.sum() > 50:
             expected = masked_blur(lab, ring, REFERENCE_SIGMA * eye_w)
@@ -518,7 +563,7 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
             delta = expected - current
             delta[..., 0] = np.clip(delta[..., 0], 0, MAX_LIFT)
             delta[..., 1:] = np.clip(delta[..., 1:], -MAX_COLOUR_SHIFT, MAX_COLOUR_SHIFT)
-            delta = cv2.GaussianBlur(delta, (0, 0), max(0.5, 0.1 * eye_w))
+            delta = blur(delta, max(0.5, 0.1 * eye_w))
             soft = _inner_feather(zone, FEATHER * eye_w)
             lab += p.dark_circles * soft[..., None] * delta
 
@@ -539,15 +584,18 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
         )
         zone = _poly_mask(shape, geo["bag"] - off)
         L = np.ascontiguousarray(lab[..., 0])
-        fine = cv2.GaussianBlur(L, (0, 0), max(0.5, BAG_FINE * eye_w))
+        fine = blur(L, max(0.5, BAG_FINE * eye_w))
         coarse = masked_blur(L, skin_below, BAG_COARSE * eye_w)
         mid = fine - coarse
         adjust = np.where(mid < 0, -mid, -BURN_RATIO * mid)
         soft = _inner_feather(zone, FEATHER * eye_w)
         _relight(lab, p.eye_bags * BAG_MAX * soft * adjust, eye_w)
 
-    if p.whites > 0 or p.iris > 0 or p.catchlight > 0:
+    if p.whites > 0 or p.iris > 0 or p.catchlight > 0 or p.veins > 0:
         _eye_itself(lab, geo, off, eye_w, p)
+
+    if p.lashes > 0:
+        _lashes(lab, geo, off, eye_w, p.lashes)
 
     rgb[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
 
@@ -581,7 +629,7 @@ def eye_openings(shape: tuple[int, int], faces: list[np.ndarray]) -> np.ndarray:
             eye_w = float(np.linalg.norm(lm[spec["corners"][0]] - lm[spec["corners"][1]]))
             one = _poly_mask((h, w), lm[spec["contour"]])
             k = 2 * max(1, round(0.05 * eye_w)) + 1
-            one = cv2.dilate(one, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-            mask = np.maximum(mask, cv2.GaussianBlur(one, (0, 0), max(0.5, 0.02 * eye_w)))
+            one = grow_mask(one, k)
+            mask = np.maximum(mask, blur(one, max(0.5, 0.02 * eye_w)))
     return mask
 

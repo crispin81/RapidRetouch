@@ -16,7 +16,6 @@ export interface OpenResult {
   preview: string; // base64 JPEG
   removals: number; // restored when switching back to a photo
   mask_edits: number;
-  light_strokes: number; // dodge & burn strokes, restored likewise
 }
 
 export interface ModelInfo {
@@ -48,6 +47,7 @@ export interface EyesParams {
   iris: number;
   catchlight: number;
   veins: number;
+  lashes: number;
 }
 
 export interface SkinRegion {
@@ -55,11 +55,18 @@ export interface SkinRegion {
   smooth: number;
   even: number;
   shine: number; // -1 matte .. 0 natural .. +1 gloss
+  texture: number; // pore softening
   // Wrinkles group (Face tab only)
   forehead_lines: number;
   frown_lines: number;
   smile_lines: number;
   chin_lines: number;
+}
+
+export interface MouthParams {
+  lip_saturation: number; // -1 muted .. 0 unchanged .. +1 rich
+  lip_smooth: number;
+  teeth_whiten: number;
 }
 
 export interface SkinParams {

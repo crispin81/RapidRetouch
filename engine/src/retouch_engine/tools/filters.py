@@ -49,3 +49,27 @@ def masked_blur(img: np.ndarray, weight: np.ndarray, sigma: float) -> np.ndarray
         if remaining.max() <= 0:
             break
     return out[..., 0] if single else out
+
+
+# Large round (elliptical) kernels make OpenCV's dilate slow: its cost grows
+# with the kernel's area. These give the same growth in time that doesn't
+# depend on the radius.
+def grow_mask(mask: np.ndarray, k: int) -> np.ndarray:
+    """A 0..1 mask grown as by a round kernel k px wide: exact, via the
+    distance to the mask (anti-aliased edges count from their midpoint)."""
+    r = (k - 1) / 2
+    if r < 3:
+        return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    outside = (mask < 0.5).astype(np.uint8)
+    dist = cv2.distanceTransform(outside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    return np.maximum(mask, (dist <= r).astype(mask.dtype))
+
+
+def max_filter(img: np.ndarray, k: int) -> np.ndarray:
+    """Local maximum over a round neighbourhood k px wide, approximated by a
+    square of the same area (separable, so fast). For smooth fields that are
+    blurred afterwards, where the corners don't show."""
+    if k <= 7:
+        return cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    side = 2 * round(0.886 * (k - 1) / 2) + 1
+    return cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_RECT, (side, side)))

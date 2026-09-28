@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from .colour import linear_to_srgb, srgb_to_linear
 from .eyes import EYES, FACE_OVAL, _inner_feather, _poly_mask, _relight, _wrinkle_lift
-from .filters import masked_blur
+from .filters import blur, grow_mask, masked_blur, max_filter
 from .reflection import guided_filter
 
 LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
@@ -31,6 +31,7 @@ FOREHEAD_RADIUS = 0.06
 EYE_CLEARANCE = 0.25  # eye widths around the eye opening (lashes)
 BROW_CLEARANCE = 0.1
 LIP_CLEARANCE = 0.02  # face widths
+WORK_FW = 600  # px: larger faces are worked out at this width and scaled up
 COLOUR_SPREAD = 3.0  # Mahalanobis distance (chromaticity) still counted as skin
 DARK_MARGIN = 35.0  # Lab L below the sampled skin's darker tones: hair, nostrils
 HIGHLIGHT = (6.0, 18.0)  # Lab L above typical skin: shine, which is still skin
@@ -56,8 +57,7 @@ def _disk(shape, centre, radius) -> np.ndarray:
 
 
 def _dilated(mask: np.ndarray, px: float) -> np.ndarray:
-    k = 2 * max(1, round(px)) + 1
-    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return grow_mask(mask, 2 * max(1, round(px)) + 1)
 
 
 def _chromaticity(lab: np.ndarray) -> np.ndarray:
@@ -95,6 +95,16 @@ class SkinModel:
         self.L_typical = float(np.median(px[:, 0]))
         self.tone = px.mean(0)  # the person's typical skin, for tone evening
 
+    def colour_probability(self, lab: np.ndarray, spread: float = COLOUR_SPREAD) -> np.ndarray:
+        """Skin by colour alone (no shine term): away from the face, bright
+        near-white things are clothes far more often than shiny skin. A wider
+        ``spread`` also takes in skin lit differently from the face."""
+        d = _chromaticity(lab) - self.rg_mean
+        m2 = np.einsum("...i,ij,...j->...", d, self.rg_inv, d)
+        colour = np.exp(-0.5 * m2 / spread**2 * 4)
+        lit = _smoothstep(lab[..., 0], self.L_low - DARK_MARGIN, self.L_low - DARK_MARGIN / 3)
+        return (colour * lit).astype(np.float32)
+
     def probability(self, lab: np.ndarray) -> np.ndarray:
         d = _chromaticity(lab) - self.rg_mean
         m2 = np.einsum("...i,ij,...j->...", d, self.rg_inv, d)
@@ -113,8 +123,8 @@ def stubble(lab: np.ndarray, face: np.ndarray, lm: np.ndarray, model: SkinModel)
     count; it's then gated by being darker or bluer than the person's skin."""
     fw = face_width(lm)
     L = lab[..., 0]
-    fine = L - cv2.GaussianBlur(L, (0, 0), max(0.5, STUBBLE_FINE * fw))
-    energy = cv2.GaussianBlur(fine * fine, (0, 0), max(0.7, STUBBLE_AREA * fw))
+    fine = L - blur(L, max(0.5, STUBBLE_FINE * fw))
+    energy = blur(fine * fine, max(0.7, STUBBLE_AREA * fw))
     ref_px = np.zeros(L.shape, bool)
     for i in CHEEK_SAMPLES:
         ref_px |= _disk(L.shape, lm[i], CHEEK_RADIUS * fw)
@@ -133,7 +143,7 @@ def stubble(lab: np.ndarray, face: np.ndarray, lm: np.ndarray, model: SkinModel)
     below = ((xx - a[0]) * normal[0] + (yy - a[1]) * normal[1]) / fw
     beard_zone = _smoothstep(below, 0.0, BEARD_LINE_FADE)
     hair = textured * np.maximum(darker, bluer) * face * beard_zone
-    hair = cv2.GaussianBlur(hair, (0, 0), max(0.7, STUBBLE_AREA * fw))
+    hair = blur(hair, max(0.7, STUBBLE_AREA * fw))
     return np.clip(hair * 1.5, 0, 1).astype(np.float32)
 
 
@@ -236,6 +246,9 @@ TEXTURE_KEEP = 0.003  # face widths: finer than this is texture, always kept
 # what marks a blemish.
 MOLE_DARK = (2.0, 3.5)  # round-spot strength (Lab L): well above a typical blemish
 MOLE_BROWN = (0.35, 0.7)  # redness per unit of darkness above this is a blemish
+TEXTURE_BAND = (0.0015, 0.015)  # face widths: pores; finer is grain, coarser is Smooth's
+TEXTURE_KNEE = 1.5  # Lab L: pores deeper than this are reduced the most
+TEXTURE_MAX = 1.0
 SMOOTH_BAND = (0.006, 0.04)  # blotchy light and shade flattened by Smooth
 SMOOTH_MAX = 0.75
 TONE_SIGMA = 0.03  # broad colour evened by Even tone
@@ -268,6 +281,7 @@ class RegionParams:
     smooth: float = 0.0
     even: float = 0.0
     shine: float = 0.0  # -1 matte .. 0 natural .. +1 gloss
+    texture: float = 0.0  # softens pores; the finest grain is kept
     forehead_lines: float = 0.0  # the wrinkle sliders exist on the Face tab only
     frown_lines: float = 0.0
     smile_lines: float = 0.0
@@ -281,7 +295,7 @@ class RegionParams:
     def is_noop(self) -> bool:
         return self.shine == 0 and all(
             getattr(self, k) <= 0
-            for k in ("blemishes", "smooth", "even", *WRINKLE_AREAS)
+            for k in ("blemishes", "smooth", "even", "texture", *WRINKLE_AREAS)
         )
 
 
@@ -291,7 +305,7 @@ def _blobs(channel: np.ndarray, fw: float) -> np.ndarray:
     out = np.zeros_like(channel)
     for scale in BLEMISH_SCALES:
         sigma = max(0.7, scale * fw)
-        g = cv2.GaussianBlur(channel, (0, 0), sigma)
+        g = blur(channel, sigma)
         gy, gx = np.gradient(g)
         gxy, gxx = np.gradient(gx)
         gyy, _ = np.gradient(gy)
@@ -325,12 +339,12 @@ def _moles(L: np.ndarray, a: np.ndarray, fw: float) -> np.ndarray:
     round_dark = _blobs(L, fw)
     small = max(0.7, BLEMISH_SCALES[1] * fw)
     large = max(1.0, 3 * BLEMISH_SCALES[-1] * fw)
-    darker = cv2.GaussianBlur(L, (0, 0), large) - cv2.GaussianBlur(L, (0, 0), small)
-    redder = cv2.GaussianBlur(a, (0, 0), small) - cv2.GaussianBlur(a, (0, 0), large)
+    darker = blur(L, large) - blur(L, small)
+    redder = blur(a, small) - blur(a, large)
     ratio = redder / np.maximum(darker, 1.0)
     mole = _smoothstep(round_dark, *MOLE_DARK) * (1 - _smoothstep(ratio, *MOLE_BROWN))
     grow = 2 * max(1, round(BLEMISH_SCALES[-1] * fw)) + 1
-    return np.clip(cv2.dilate(mole, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow))), 0, 1)
+    return np.clip(max_filter(mole, grow), 0, 1)
 
 
 def _heal_blemishes(lab, W, fw, amount):
@@ -339,28 +353,28 @@ def _heal_blemishes(lab, W, fw, amount):
     dark = _smoothstep(_blobs(L, fw), *[t * (1.4 - 0.6 * amount) for t in BLEMISH_DARK])
     red = _smoothstep(_blobs(-a, fw), *[t * (1.4 - 0.6 * amount) for t in BLEMISH_RED])
     # A spot sitting on a strong shading edge (e.g. a shadow line) is lighting.
-    broad = cv2.GaussianBlur(L, (0, 0), max(0.7, BLEMISH_SCALES[-1] * fw))
+    broad = blur(L, max(0.7, BLEMISH_SCALES[-1] * fw))
     gy, gx = np.gradient(broad)
     edge = _smoothstep(np.hypot(gx, gy) * 2 * BLEMISH_SCALES[-1] * fw, *EDGE_GATE)
     spot = np.maximum(dark, red) * W * (1 - edge) * (1 - _moles(L, a, fw))
     grow = max(1.0, BLEMISH_SCALES[-1] * fw)
-    spot = cv2.GaussianBlur(cv2.dilate(spot, np.ones((3, 3), np.uint8), iterations=max(1, round(grow / 2))), (0, 0), grow / 2)
+    spot = blur(cv2.dilate(spot, np.ones((3, 3), np.uint8), iterations=max(1, round(grow / 2))), grow / 2)
     spot = np.clip(spot * 1.5, 0, 1)
     # The skin around each spot, then only its broad colour/tone is moved: the
     # finest texture stays, so a healed spot isn't a smooth patch.
     around = masked_blur(lab, W * (1 - spot) ** 2, max(1.0, 1.5 * BLEMISH_SCALES[-1] * fw))
     keep = max(0.5, TEXTURE_KEEP * fw)
-    delta = cv2.GaussianBlur(around, (0, 0), keep) - cv2.GaussianBlur(lab, (0, 0), keep)
+    delta = blur(around, keep) - blur(lab, keep)
     lab += (amount * spot)[..., None] * delta
 
 
 def _smooth(lab, W, fw, amount, eye_w):
     L = np.ascontiguousarray(lab[..., 0])
-    fine = cv2.GaussianBlur(L, (0, 0), max(0.5, SMOOTH_BAND[0] * fw))
+    fine = blur(L, max(0.5, SMOOTH_BAND[0] * fw))
     coarse = _skin_base(L, W, SMOOTH_BAND[1] * fw)
     _relight(lab, -amount * SMOOTH_MAX * W * (fine - coarse), eye_w)
     ab = np.ascontiguousarray(lab[..., 1:])
-    fine_ab = cv2.GaussianBlur(ab, (0, 0), max(0.5, SMOOTH_BAND[0] * fw))
+    fine_ab = blur(ab, max(0.5, SMOOTH_BAND[0] * fw))
     coarse_ab = masked_blur(ab, W, max(1.0, SMOOTH_BAND[1] * fw))
     lab[..., 1:] -= (0.5 * amount * W)[..., None] * (fine_ab - coarse_ab)
 
@@ -413,6 +427,23 @@ def _smooth_lines(lab, W, lm, fw, p: RegionParams, eye_w):
         _relight(lab, amount * _wrinkle_lift(L, zone, eye_w, scales, fold_keep), eye_w)
 
 
+def _texture(lab: np.ndarray, W: np.ndarray, fw: float, amount: float) -> None:
+    """Soften pores without the plastic look, in place.
+
+    Plastic skin comes from wiping out all fine detail. Pores sit in a narrow
+    band of sizes: finer than it is the skin's grain, which is what reads as
+    real skin, and is kept as shot. Within the band, the most visible pores (the
+    strongest deviations) are reduced most, so the texture evens out instead of
+    vanishing."""
+    L = np.ascontiguousarray(lab[..., 0])
+    grain = blur(L, max(0.5, TEXTURE_BAND[0] * fw))
+    pores = grain - blur(L, max(0.7, TEXTURE_BAND[1] * fw))
+    # Stronger pores lose more: a soft knee at TEXTURE_KNEE (Lab L).
+    strength = np.abs(pores) / (np.abs(pores) + TEXTURE_KNEE)
+    reduce = amount * TEXTURE_MAX * (0.5 + 0.5 * strength)
+    lab[..., 0] = L - W * reduce * pores
+
+
 def _apply_region(lab, W, fw, p: RegionParams, model, lm=None):
     eye_w = 0.2 * fw  # the eye tools' colour-matching scale, in this face's units
     if lm is not None:  # wrinkles first, while the fine detail is as shot
@@ -445,8 +476,27 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], face_params: dict | None) ->
         x1, y1 = np.minimum(np.ceil(pts.max(0) + 0.15 * fw), [w, h]).astype(int)
         crop = np.clip(out[y0:y1, x0:x1], 0, 1)
         lab = cv2.cvtColor(crop, cv2.COLOR_RGB2Lab)
-        skin_w, hair, model = face_skin(lab, lm - [x0, y0])
-        W = cv2.GaussianBlur(skin_w * (1 - hair), (0, 0), max(0.7, 0.004 * fw))
-        _apply_region(lab, W, fw, p, model, lm - [x0, y0])
+        # Large faces (zoomed-in detail, export) are worked out on a smaller copy:
+        # every correction here is smooth at WORK_FW, so the change is measured
+        # there, scaled up and added to the full-resolution pixels, whose pores
+        # and fine texture stay exactly as shot. ~10x faster at full resolution.
+        s = min(1.0, WORK_FW / fw)
+        work = lab if s == 1 else cv2.resize(lab, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        before = work.copy()
+        wlm = (lm - [x0, y0]) * [work.shape[1] / lab.shape[1], work.shape[0] / lab.shape[0]]
+        wfw = fw * work.shape[1] / lab.shape[1]
+        skin_w, hair, model = face_skin(work, wlm)
+        W = blur(skin_w * (1 - hair), max(0.7, 0.004 * wfw))
+        _apply_region(work, W, wfw, p, model, wlm)
+        if s == 1:
+            lab = work
+        else:
+            delta = cv2.resize(work - before, (lab.shape[1], lab.shape[0]), interpolation=cv2.INTER_CUBIC)
+            lab += delta
+        if p.texture > 0:
+            # Pores are too small to work out on the smaller copy: this one runs
+            # at the image's own resolution.
+            W_full = W if s == 1 else cv2.resize(W, (lab.shape[1], lab.shape[0]), interpolation=cv2.INTER_LINEAR)
+            _texture(lab, W_full, fw, p.texture)
         out[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
     return out

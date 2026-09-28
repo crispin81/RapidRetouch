@@ -1,22 +1,29 @@
 import numpy as np
 
 from retouch_engine.tools import dodge_burn, patch
-from retouch_engine.tools.colour import srgb_to_linear
 
 
 def _grey(h=200, w=300, v=0.4):
     return np.full((h, w, 3), v, np.float32)
 
 
-def test_dodge_brightens_by_its_stops_and_burn_undoes_it():
+def test_dodge_burn_zones_brighten_high_points_and_deepen_the_edge():
+    # A synthetic face: landmarks laid out on a unit square scaled to 400 px.
+    rng = np.random.default_rng(0)
+    lm = rng.uniform(150, 250, (478, 2)).astype(np.float32)
+    from retouch_engine.tools.skin import FACE_OVAL
+
+    t = np.linspace(0, 2 * np.pi, len(FACE_OVAL), endpoint=False)
+    lm[FACE_OVAL] = np.stack([200 + 150 * np.sin(t), 200 - 180 * np.cos(t)], 1)
+    lm[151], lm[9] = (200, 90), (200, 140)
+    dodge, burn = dodge_burn.zones((400, 400), lm, fw=300)
+    assert dodge[110, 200] > 0.5  # forehead centre
+    assert burn[200, 55] > 0.5 and dodge[200, 55] < 0.1  # the face's edge
+
+
+def test_dodge_burn_off_changes_nothing():
     img = _grey()
-    stroke = {"points": [[0.5, 0.5]], "radius": 0.1, "strength": 1.0, "softness": 0.0}
-    dodged = dodge_burn.apply(img, [{**stroke, "mode": "dodge"}])
-    gain = srgb_to_linear(dodged[100, 150]) / srgb_to_linear(img[100, 150])
-    np.testing.assert_allclose(gain, 2**dodge_burn.MAX_STOPS, rtol=0.02)
-    assert np.allclose(dodged[5, 5], img[5, 5])  # untouched away from the stroke
-    both = dodge_burn.apply(img, [{**stroke, "mode": "dodge"}, {**stroke, "mode": "burn"}])
-    np.testing.assert_allclose(both, img, atol=1e-4)
+    assert np.array_equal(dodge_burn.apply(img, [], 0.0), img)
 
 
 def test_patch_copies_texture_but_keeps_the_target_tone():
