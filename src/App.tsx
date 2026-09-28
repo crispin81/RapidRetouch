@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   FolderOpen,
   Download,
@@ -12,6 +13,8 @@ import {
   Minus,
   ZoomIn,
   Maximize,
+  Coffee,
+  Smile,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -26,6 +29,12 @@ import {
 import PaintOverlay from "./PaintOverlay";
 import Slider from "./Slider";
 import Viewer, { Detail, ViewerHandle } from "./Viewer";
+import TitleBar from "./TitleBar";
+
+const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
+// No Retouch tutorial yet: the banner says so until this is set.
+const TUTORIAL_VIDEO_URL: string | null = null;
+const TUTORIAL_DISMISSED_KEY = "retouch.tutorialDismissed";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
 import "./App.css";
@@ -182,6 +191,22 @@ export default function App() {
   const [zoomLabel, setZoomLabel] = useState("Fit");
   const [detail, setDetail] = useState<Detail | null>(null);
   const viewerRef = useRef<ViewerHandle>(null);
+  const [tutorialDismissed, setTutorialDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(TUTORIAL_DISMISSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const dismissTutorial = () => {
+    setTutorialDismissed(true);
+    try {
+      localStorage.setItem(TUTORIAL_DISMISSED_KEY, "1");
+    } catch {
+      // storage unavailable: dismissal just won't persist across restarts
+    }
+  };
   const compareToken = useRef(0);
 
   // Only one preview render at a time; while one runs, remember that the
@@ -529,7 +554,32 @@ export default function App() {
 
   return (
     <div className="app">
+      <TitleBar />
       <header className="toolbar">
+        {!tutorialDismissed && (
+          <div className="video-link">
+            <a
+              className="video-link__cta"
+              href={TUTORIAL_VIDEO_URL ?? "#"}
+              onClick={(e) => {
+                e.preventDefault();
+                if (TUTORIAL_VIDEO_URL) openUrl(TUTORIAL_VIDEO_URL);
+                else setStatus("Tutorial video coming soon");
+              }}
+              title="Watch the tutorial video on YouTube"
+            >
+              ▶ New user? Watch this first!
+            </a>
+            <button
+              type="button"
+              className="video-link__close"
+              onClick={dismissTutorial}
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
         <button onClick={openImage} disabled={!engineReady}>
           <FolderOpen size={16} /> Open
         </button>
@@ -810,6 +860,25 @@ export default function App() {
             {busy && <span className="spinner" />} {status}
           </span>
         )}
+      </footer>
+
+      <footer className="app-footer">
+        <span className="oss-note">
+          Retouch is free and open-source software. Developed and maintained by Chris Cork
+          Photography.
+        </span>
+        <a
+          className="coffee-link"
+          href={COFFEE_URL}
+          onClick={(e) => {
+            e.preventDefault();
+            openUrl(COFFEE_URL);
+          }}
+          title="Buy Chris a coffee"
+        >
+          Feed Chris' coffee addiction <Smile size={13} color="#ffcc33" />{" "}
+          <Coffee size={13} color="#ffcc33" />
+        </a>
       </footer>
 
       {licencePrompt && (

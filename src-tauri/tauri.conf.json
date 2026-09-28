@@ -16,7 +16,8 @@
         "title": "Retouch",
         "width": 1500,
         "height": 950,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "decorations": false
       }
     ],
     "security": {

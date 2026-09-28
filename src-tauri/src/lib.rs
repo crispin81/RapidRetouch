@@ -15,6 +15,7 @@ async fn engine_call(engine: State<'_, Engine>, method: String, params: Value) -
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let engine = Engine::spawn(app.handle().clone())?;
             app.manage(engine);
