@@ -54,7 +54,7 @@ import "./App.css";
 const DEFAULTS: BackdropParams = {
   strength: 1,
   smoothness: 1.5,
-  evenness: 0,
+  evenness: 0.75,
   grain: 1,
   edge_protect: 0.4,
   exposure: 0,
