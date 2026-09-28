@@ -6,6 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Chris Cork", email = "info@chriscorkphotography.co.uk" }
 ]
+license = "AGPL-3.0-only"
 requires-python = ">=3.12"
 dependencies = [
     "einops>=0.8.2",
