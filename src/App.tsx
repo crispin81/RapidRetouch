@@ -179,6 +179,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [brushOn, setBrushOn] = useState(false);
   const [brushRadius, setBrushRadius] = useState(BRUSH.default);
+  // The mask brush has its own size: mask edits (long soft strokes along hair)
+  // usually want a different size from spot removals.
+  const [maskBrushRadius, setMaskBrushRadius] = useState(BRUSH.default * 2);
   const [removals, setRemovals] = useState(0);
   const [removing, setRemoving] = useState(false);
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
@@ -349,10 +352,11 @@ export default function App() {
       } else if (view !== "mask" && (e.key === "b" || e.key === "B")) {
         setBrushOn((on) => !on);
         setZoomTool(false);
-      } else if (e.key === "[") {
-        setBrushRadius((r) => clampBrush(r / 1.2));
-      } else if (e.key === "]") {
-        setBrushRadius((r) => clampBrush(r * 1.2));
+      } else if (e.key === "[" || e.key === "]") {
+        // Resize whichever brush is in use.
+        const factor = e.key === "]" ? 1.2 : 1 / 1.2;
+        const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
+        setRadius((r) => clampBrush(r * factor));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -655,7 +659,7 @@ export default function App() {
                 <PaintOverlay
                   image={imgEl}
                   active={!panning && !zoomTool}
-                  radius={brushRadius}
+                  radius={maskBrushRadius}
                   pending={maskPending}
                   onStroke={onMaskStroke}
                   colour={maskMode === "add" ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 40, 40, 0.6)"}
@@ -798,8 +802,19 @@ export default function App() {
                   <Trash2 size={15} />
                 </button>
               </div>
+              <Slider
+                label="Brush size"
+                hint="Mask brush size ([ and ] keys)"
+                min={BRUSH.min}
+                max={BRUSH.max}
+                step={BRUSH.step}
+                value={maskBrushRadius}
+                defaultValue={BRUSH.default * 2}
+                format={(v) => (v * 100).toFixed(1)}
+                onChange={setMaskBrushRadius}
+              />
               <p className="panel__model">
-                Paint on the photo to correct the mask. Brush size is shared with the Remove brush.
+                Paint on the photo to correct the mask. [ and ] resize the brush.
                 {maskEdits > 0 && ` ${maskEdits} edit${maskEdits === 1 ? "" : "s"}.`}
               </p>
             </>
