@@ -94,8 +94,9 @@ def save(path: str | Path, rgb: np.ndarray, bit_depth: int, icc: bytes | None) -
         im.save(path, quality=95, icc_profile=icc) if icc else im.save(path, quality=95)
 
 
-def thumbnail(path: str | Path, edge: int = 240) -> Image.Image:
-    """A small, correctly rotated preview for the film strip, fast.
+def thumbnail(path: str | Path, edge: int = 240) -> tuple[Image.Image, tuple[int, int]]:
+    """A small, correctly rotated preview, fast, plus the photo's full size
+    (width, height) as it will be once opened.
 
     RAW files use the camera's embedded JPEG (a few ms) rotated by LibRaw's
     orientation flag, falling back to a quick half-size decode; other files are
@@ -108,6 +109,9 @@ def thumbnail(path: str | Path, edge: int = 240) -> Image.Image:
 
         with rawpy.imread(str(path)) as raw:
             flip = raw.sizes.flip
+            full = (raw.sizes.width, raw.sizes.height)
+            if flip in (5, 6):
+                full = full[::-1]
             try:
                 th = raw.extract_thumb()
                 if th.format == rawpy.ThumbFormat.JPEG:
@@ -125,11 +129,13 @@ def thumbnail(path: str | Path, edge: int = 240) -> Image.Image:
     elif path.suffix.lower() in (".tif", ".tiff"):
         rgb = load(path).rgb  # 16-bit TIFFs aren't reliably readable by PIL
         im = Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+        full = im.size
     else:
         from PIL import ImageOps
 
         with Image.open(path) as src:
             im = ImageOps.exif_transpose(src).convert("RGB")
+        full = im.size
     im.thumbnail((edge, edge))
-    return im
+    return im, full
 

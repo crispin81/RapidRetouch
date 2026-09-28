@@ -662,3 +662,24 @@ button.primary {
 .filmstrip__item:hover .filmstrip__remove {
   display: inline-flex;
 }
+
+/* "Retouching in 3, 2, 1": each number pops in (keyed, so it re-animates). */
+.countdown {
+  display: inline-block;
+  min-width: 0.8em;
+  color: #ffcc33;
+  font-weight: 700;
+  font-size: 14px;
+  animation: countdown-pop 0.35s ease-out;
+}
+
+@keyframes countdown-pop {
+  from {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

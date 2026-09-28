@@ -175,10 +175,12 @@ class Engine:
         }
 
     def thumbnail(self, path: str, edge: int = 240) -> dict:
-        """Film-strip thumbnail (base64 JPEG)."""
+        """Quick preview (base64 JPEG) for the film strip or for scanning through
+        photos, with the photo's full size so the viewer can lay it out."""
+        im, (w, h) = imageio.thumbnail(path, edge)
         buf = io.BytesIO()
-        imageio.thumbnail(path, edge).save(buf, "JPEG", quality=85)
-        return {"image": base64.b64encode(buf.getvalue()).decode()}
+        im.save(buf, "JPEG", quality=85 if edge <= 400 else 90)
+        return {"image": base64.b64encode(buf.getvalue()).decode(), "width": w, "height": h}
 
     def forget(self, path: str) -> dict:
         """Drop the stored edits of a photo taken out of the film strip."""

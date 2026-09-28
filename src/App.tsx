@@ -46,6 +46,9 @@ const TUTORIAL_VIDEO_URL: string | null = null;
 const TUTORIAL_DISMISSED_KEY = "retouch.tutorialDismissed";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
+// Scanning: a photo is only opened and processed after this long on it (or as
+// soon as it's edited), so stepping through a shoot isn't slowed down.
+const OPEN_DELAY_MS = 3000;
 import "./App.css";
 
 const DEFAULTS: BackdropParams = {
@@ -271,6 +274,62 @@ export default function App() {
     else setError(errorMessage(e));
   }, []);
 
+  // Which photo is being looked at, and which one the engine has open. While
+  // scanning they differ: the viewer shows the camera's embedded preview and
+  // nothing is processed until ensureOpen() (the timer, or any edit).
+  const activePath = useRef<string | null>(null);
+  const openedPath = useRef<string | null>(null);
+  const openedInfo = useRef<(OpenResult & { path: string }) | null>(null);
+  const opening = useRef<{ path: string; done: Promise<boolean> } | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  // "Retouching in 3, 2, 1" in the footer while a photo waits to be opened.
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const countdownTimer = useRef<number | undefined>(undefined);
+  const stopCountdown = () => {
+    window.clearInterval(countdownTimer.current);
+    setCountdown(null);
+  };
+  const startCountdown = () => {
+    window.clearInterval(countdownTimer.current);
+    setCountdown(Math.round(OPEN_DELAY_MS / 1000));
+    countdownTimer.current = window.setInterval(
+      () => setCountdown((c) => (c !== null && c > 1 ? c - 1 : c)),
+      1000,
+    );
+  };
+
+  /** Open the photo being looked at in the engine, if it isn't already.
+   * Concurrent callers share one open. Returns false if it failed. */
+  const ensureOpen = useCallback(async (): Promise<boolean> => {
+    const path = activePath.current;
+    if (!path) return false;
+    if (openedPath.current === path) return true;
+    if (opening.current?.path === path) return opening.current.done;
+    window.clearTimeout(openTimer.current);
+    stopCountdown();
+    const done = (async () => {
+      try {
+        const r = await call<OpenResult>("open", { path });
+        openedPath.current = path;
+        openedInfo.current = { ...r, path };
+        if (activePath.current === path) {
+          setImage({ ...r, path });
+          setRemovals(r.removals);
+          setMaskEdits(r.mask_edits);
+        }
+        saveLastDir(path.replace(/\/[^/]*$/, ""));
+        return true;
+      } catch (e) {
+        handleError(e);
+        return false;
+      } finally {
+        if (opening.current?.path === path) opening.current = null;
+      }
+    })();
+    opening.current = { path, done };
+    return done;
+  }, [handleError]);
+
   const render = useCallback(async () => {
     if (inFlight.current) {
       dirty.current = true;
@@ -279,12 +338,16 @@ export default function App() {
     inFlight.current = true;
     setBusy(true);
     try {
+      if (!(await ensureOpen())) return;
       do {
         dirty.current = false;
+        const forPath = openedPath.current;
         const r = await call<{ preview: string; faces: number | null }>("render", {
           backdrop: paramsRef.current,
           eyes: eyesRef.current,
         });
+        // Moved on to another photo meanwhile: don't show this one's result.
+        if (forPath !== activePath.current) break;
         setResult(r.preview);
         setFaces(r.faces);
       } while (dirty.current);
@@ -295,7 +358,7 @@ export default function App() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [handleError]);
+  }, [handleError, ensureOpen]);
 
   const updateParam = (key: keyof BackdropParams, value: number) => {
     const next = { ...paramsRef.current, [key]: value };
@@ -317,6 +380,7 @@ export default function App() {
       setRemoving(true);
       setBusy(true);
       try {
+        if (!(await ensureOpen())) return;
         const r = await call<{ preview: string; removals: number }>(method, {
           ...extra,
           backdrop: paramsRef.current,
@@ -332,7 +396,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [handleError],
+    [handleError, ensureOpen],
   );
 
   const onStroke = (points: [number, number][], radius: number) =>
@@ -417,28 +481,57 @@ export default function App() {
     );
 
   /** Make ``path`` the photo being edited, keeping the current one's settings
-   * (unless it's being taken out of the strip). */
+   * (unless it's being taken out of the strip). Shows the camera's embedded
+   * preview straight away; the engine opens it after OPEN_DELAY_MS, or as soon
+   * as it's edited. */
   const loadImage = async (path: string, keepCurrent = true) => {
-    if (image && keepCurrent) {
-      settingsByPath.current.set(image.path, currentSettings());
-      markEdited(image.path, currentSettings());
+    const current = activePath.current;
+    if (current && keepCurrent) {
+      settingsByPath.current.set(current, currentSettings());
+      markEdited(current, currentSettings());
     }
+    activePath.current = path;
+    window.clearTimeout(openTimer.current);
+    stopCountdown();
     setError(null);
     setResult(null);
     setMask(null);
     setView("result");
     setFaces(null);
+    setRemovals(0);
+    setMaskEdits(0);
     applySettings(settingsByPath.current.get(path) ?? { backdrop: DEFAULTS, eyes: EYE_DEFAULTS });
-    try {
-      const r = await call<OpenResult>("open", { path });
-      setImage({ ...r, path });
-      setRemovals(r.removals);
-      setMaskEdits(r.mask_edits);
-      saveLastDir(path.replace(/\/[^/]*$/, ""));
+
+    // Back to the photo the engine already has: no need to wait.
+    if (openedPath.current === path && openedInfo.current) {
+      setImage(openedInfo.current);
+      setRemovals(openedInfo.current.removals);
+      setMaskEdits(openedInfo.current.mask_edits);
       render();
+      return;
+    }
+    try {
+      const q = await call<{ image: string; width: number; height: number }>("thumbnail", {
+        path,
+        edge: PREVIEW_EDGE,
+      });
+      if (activePath.current !== path) return;
+      setImage({
+        path,
+        width: q.width,
+        height: q.height,
+        bit_depth: 0, // not known until opened
+        preview: q.image,
+        removals: 0,
+        mask_edits: 0,
+      });
     } catch (e) {
       handleError(e);
     }
+    startCountdown();
+    openTimer.current = window.setTimeout(async () => {
+      if (activePath.current === path && (await ensureOpen())) render();
+    }, OPEN_DELAY_MS);
   };
 
   const openImage = async () => {
@@ -497,6 +590,9 @@ export default function App() {
         await loadImage(neighbour.path, false);
         setSelected(new Set([neighbour.path]));
       } else {
+        activePath.current = null;
+        window.clearTimeout(openTimer.current);
+        stopCountdown();
         setImage(null);
         setResult(null);
       }
@@ -541,6 +637,7 @@ export default function App() {
     async (method: string, extra: Record<string, unknown> = {}) => {
       setMaskPending(true);
       try {
+        if (!(await ensureOpen())) return false;
         const r = await call<{ preview: string; mask_edits: number }>(method, extra);
         setMask(r.preview);
         setMaskEdits(r.mask_edits);
@@ -553,7 +650,7 @@ export default function App() {
         setMaskPending(false);
       }
     },
-    [handleError],
+    [handleError, ensureOpen],
   );
 
   const showMask = async () => {
@@ -578,6 +675,7 @@ export default function App() {
     setCompareStep(step);
     setView("compare");
     try {
+      if (!(await ensureOpen())) return;
       const r = await call<{ preview: string }>("render", {
         backdrop: step === "backdrop" ? null : paramsRef.current,
         eyes: step === "eyes" ? null : eyesRef.current,
@@ -626,7 +724,9 @@ export default function App() {
         detailDirty.current = false;
         const want = wantedRegion.current;
         const args = detailArgsRef.current();
-        if (!want || !args) break;
+        // Zoom detail waits for the real open rather than forcing one, so
+        // scanning while zoomed in stays fast; it's re-asked once opened.
+        if (!want || !args || openedPath.current !== activePath.current) break;
         const version = contentVersion.current;
         const r = await call<Detail>("render_region", {
           region: want.region,
@@ -659,7 +759,7 @@ export default function App() {
   }, [result, compareImg, view, compareStep, requestDetail]);
 
   const exportImage = async () => {
-    if (!image) return;
+    if (!image || !(await ensureOpen())) return;
     const stem = image.path.replace(/\.[^./]+$/, "");
     const path = await save({
       defaultPath: `${stem}_retouched.tif`,
@@ -766,7 +866,8 @@ export default function App() {
         <div className="toolbar__spacer" />
         {image && (
           <span className="toolbar__info">
-            {image.path.split("/").pop()} · {image.width}×{image.height} · {image.bit_depth}-bit
+            {image.path.split("/").pop()} · {image.width}×{image.height} ·{" "}
+            {image.bit_depth ? `${image.bit_depth}-bit` : "preview"}
           </span>
         )}
       </header>
@@ -1061,6 +1162,13 @@ export default function App() {
           {error ? (
             <span className="statusbar__error" onClick={() => setError(null)} title="Click to dismiss">
               {error}
+            </span>
+          ) : countdown !== null ? (
+            <span>
+              Retouching in{" "}
+              <span key={countdown} className="countdown">
+                {countdown}
+              </span>
             </span>
           ) : (
             <span>
