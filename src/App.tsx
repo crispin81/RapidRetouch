@@ -1461,8 +1461,8 @@ export default function App() {
           }}
           title="Buy Chris a coffee"
         >
-          Feed Chris' coffee addiction <Smile size={13} color="#ffcc33" />{" "}
-          <Coffee size={13} color="#ffcc33" />
+          Feed Chris' coffee addiction <Smile size={16} color="#ffcc33" />{" "}
+          <Coffee size={16} color="#ffcc33" />
         </a>
       </footer>
 
