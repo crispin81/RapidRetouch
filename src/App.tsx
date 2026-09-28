@@ -916,7 +916,7 @@ export default function App() {
 
       <footer className="app-footer">
         <span className="oss-note">
-          Retouch is free and open-source software, licensed AGPL-3.0. Developed and maintained
+          RapidRetouch is free and open-source software, licensed AGPL-3.0. Developed and maintained
           by Chris Cork Photography.
         </span>
         <a

@@ -8,7 +8,8 @@ export default function TitleBar() {
   return (
     <div className="titlebar" data-tauri-drag-region>
       <span className="titlebar__title" data-tauri-drag-region>
-        <span className="titlebar__title-name">Retouch</span>{" "}
+        <span className="titlebar__title-rapid">Rapid</span>
+        <span className="titlebar__title-retouch">Retouch</span>{" "}
         <span className="titlebar__version">v0.1</span> <span className="titlebar__beta">beta</span>
       </span>
       <div className="titlebar__controls">

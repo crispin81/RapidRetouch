@@ -422,7 +422,11 @@ button.primary {
   pointer-events: none;
 }
 
-.titlebar__title-name {
+.titlebar__title-rapid {
+  font-style: italic;
+}
+
+.titlebar__title-retouch {
   font-weight: 600;
 }
 
