@@ -24,7 +24,7 @@ from PIL import Image
 
 from . import imageio
 from .registry import LicenceNotAccepted, Registry
-from .tools import backdrop_smooth, inpaint, mask_edit
+from .tools import backdrop_smooth, inpaint, mask_edit, reflection
 from .tools import eyes as eye_tool
 
 PREVIEW_EDGE = 2048
@@ -94,6 +94,7 @@ class Engine:
         # Full-resolution pipeline stages, each (key, value) keyed by exactly what
         # it depends on, shared by zoomed-in detail views and export.
         self._full: dict[str, tuple] = {}
+        self._eye_masks: dict[tuple, np.ndarray] = {}  # eye openings, per image size
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
@@ -137,6 +138,7 @@ class Engine:
         self.mask_edits = []
         self.faces = None
         self._full = {}
+        self._eye_masks = {}
         self.backdrop_cache = {}
         self.strokes, self.filled_previews = [], []
         self.edit_version += 1
@@ -231,17 +233,22 @@ class Engine:
         radius: float,
         backdrop: dict | None = None,
         eyes: dict | None = None,
+        kind: str = "fill",
+        strength: float = 1.0,
     ) -> dict:
-        """Fill one painted stroke with LaMa, then re-render the preview."""
+        """Apply one painted stroke, then re-render the preview. ``kind`` is
+        "fill" (LaMa removal) or "reflection" (glasses reflection, alpha)."""
         self._require_image()
         if not points:
             raise ValueError("empty stroke")
-        stroke = {"points": points, "radius": radius}
+        if kind not in ("fill", "reflection"):
+            raise ValueError(f"unknown stroke kind {kind!r}")
+        stroke = {"kind": kind, "points": points, "radius": radius}
+        if kind == "reflection":
+            stroke["strength"] = float(strength)
         base = self._edited_preview()
-        mask = inpaint.stroke_mask(base.shape[:2], points, radius)
-        lama = self._inpaint_model()
-        self.status("Removing")
-        self.filled_previews.append(inpaint.fill(base, mask, lama, self.status))
+        self.status("Removing reflection" if kind == "reflection" else "Removing")
+        self.filled_previews.append(self._apply_stroke(base, stroke))
         self.strokes.append(stroke)
         self.edit_version += 1
         return {"preview": _jpeg_b64(self._render(backdrop, eyes)), "removals": len(self.strokes)}
@@ -268,6 +275,26 @@ class Engine:
             self.status("Finding faces")
             self.faces = model.predict(self.image.rgb)
         return self.faces
+
+    def _apply_stroke(self, rgb: np.ndarray, stroke: dict) -> np.ndarray:
+        """One Remove-panel stroke, at whatever resolution ``rgb`` is."""
+        h, w = rgb.shape[:2]
+        if stroke.get("kind", "fill") == "reflection":
+            mask = inpaint.stroke_mask((h, w), stroke["points"], stroke["radius"], grow=0)
+            return reflection.remove(
+                rgb,
+                mask,
+                stroke["radius"] * max(h, w),
+                stroke.get("strength", 1.0),
+                self._eye_openings((h, w)),
+            )
+        mask = inpaint.stroke_mask((h, w), stroke["points"], stroke["radius"])
+        return inpaint.fill(rgb, mask, self._inpaint_model(), self.status)
+
+    def _eye_openings(self, shape: tuple[int, int]) -> np.ndarray:
+        if shape not in self._eye_masks:
+            self._eye_masks[shape] = eye_tool.eye_openings(shape, self._ensure_faces())
+        return self._eye_masks[shape]
 
     def _inpaint_model(self):
         manifest = self.registry.default_for("inpaint")
@@ -397,8 +424,6 @@ class Engine:
         h, w = rgb.shape[:2]
 
         if removals and self.strokes:
-            lama = self._inpaint_model()
-
             # Strokes only ever get appended (or undone), so if the cached fills
             # are a prefix of the current strokes, only the new ones need filling.
             done, out = [], self.image.rgb
@@ -407,13 +432,16 @@ class Engine:
                 done, out = hit[0], hit[1]
             for i, stroke in enumerate(self.strokes[len(done):], len(done) + 1):
                 self.status(f"Removing at full resolution ({i} of {len(self.strokes)})")
-                mask = inpaint.stroke_mask((h, w), stroke["points"], stroke["radius"])
-                out = inpaint.fill(out, mask, lama)
+                out = self._apply_stroke(out, stroke)
             self._full["edited"] = (list(self.strokes), out)
             rgb = out
-            steps.append(
-                {"tool": "remove", "strokes": self.strokes, "models": [lama.manifest.provenance()]}
-            )
+            kinds = {s.get("kind", "fill") for s in self.strokes}
+            models = []
+            if "fill" in kinds:
+                models.append(self.registry.default_for("inpaint").provenance())
+            if "reflection" in kinds:  # eye openings come from the face landmarks
+                models.append(self.registry.default_for("face_landmarks").provenance())
+            steps.append({"tool": "remove", "strokes": self.strokes, "models": models})
 
         if backdrop is not None:
             self._ensure_mask(model)

@@ -15,6 +15,7 @@ import {
   Maximize,
   Coffee,
   Smile,
+  Glasses,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -183,6 +184,9 @@ export default function App() {
   // usually want a different size from spot removals.
   const [maskBrushRadius, setMaskBrushRadius] = useState(BRUSH.default * 2);
   const [removals, setRemovals] = useState(0);
+  // Remove-panel brush mode: LaMa fill, or glasses reflection (alpha).
+  const [removeMode, setRemoveMode] = useState<"fill" | "reflection">("fill");
+  const [reflectionStrength, setReflectionStrength] = useState(1);
   const [removing, setRemoving] = useState(false);
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
   const [maskEdits, setMaskEdits] = useState(0);
@@ -319,7 +323,19 @@ export default function App() {
   );
 
   const onStroke = (points: [number, number][], radius: number) =>
-    removalCall("remove", { points, radius });
+    removalCall(
+      "remove",
+      removeMode === "reflection"
+        ? { points, radius, kind: "reflection", strength: reflectionStrength }
+        : { points, radius },
+    );
+
+  // Brush and Glasses pick the brush mode; clicking the active one turns it off.
+  const pickRemoveBrush = (mode: "fill" | "reflection") => {
+    setBrushOn((on) => !(on && removeMode === mode));
+    setRemoveMode(mode);
+    setZoomTool(false);
+  };
   const undoRemove = () => removalCall("undo_remove");
   const clearRemovals = () => removalCall("clear_removals");
 
@@ -653,6 +669,7 @@ export default function App() {
                   radius={brushRadius}
                   pending={removing}
                   onStroke={onStroke}
+                  colour={removeMode === "reflection" ? "rgba(64, 200, 255, 0.45)" : undefined}
                 />
               )}
               {image && view === "mask" && (
@@ -685,14 +702,19 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={!image}
-              onClick={() => {
-                setBrushOn((on) => !on);
-                setZoomTool(false);
-              }}
-              className={brushOn ? "active" : ""}
+              onClick={() => pickRemoveBrush("fill")}
+              className={brushOn && removeMode === "fill" ? "active" : ""}
               title="Paint over anything to remove it (B)"
             >
               <Paintbrush size={15} /> Brush
+            </button>
+            <button
+              disabled={!image}
+              onClick={() => pickRemoveBrush("reflection")}
+              className={brushOn && removeMode === "reflection" ? "active" : ""}
+              title="Glasses reflection (alpha): paint over a reflection on a lens to remove it"
+            >
+              <Glasses size={15} /> Glasses (alpha)
             </button>
             <button
               disabled={!image || removals === 0 || removing}
@@ -732,10 +754,25 @@ export default function App() {
             disabled={!image}
             onChange={setBrushRadius}
           />
+          {removeMode === "reflection" && (
+            <Slider
+              label="Reflection strength"
+              hint="How much of the reflection each new stroke removes"
+              min={0}
+              max={1}
+              step={0.05}
+              value={reflectionStrength}
+              defaultValue={1}
+              disabled={!image}
+              onChange={setReflectionStrength}
+            />
+          )}
           <p className="panel__model">
-            {removals > 0
-              ? `${removals} removal${removals === 1 ? "" : "s"} · LaMa · Apache-2.0`
-              : "Paint over a distraction; it's filled when you let go. Fill: LaMa · Apache-2.0"}
+            {removeMode === "reflection"
+              ? "Glasses reflection (alpha): paint just the reflection, a little past its edges, not the whole lens. A faint trace may remain; paint over it again to take more."
+              : removals > 0
+                ? `${removals} removal${removals === 1 ? "" : "s"} · LaMa · Apache-2.0`
+                : "Paint over a distraction; it's filled when you let go. Fill: LaMa · Apache-2.0"}
           </p>
         </section>
 

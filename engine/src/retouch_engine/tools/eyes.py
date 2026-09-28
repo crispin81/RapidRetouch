@@ -568,3 +568,20 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
                 continue
             _correct_eye(out, geo, p)
     return out
+
+
+def eye_openings(shape: tuple[int, int], faces: list[np.ndarray]) -> np.ndarray:
+    """Soft mask (float32 HxW) of every eye opening, lashes included, for tools
+    that need to treat the eyes differently from skin."""
+    h, w = shape
+    mask = np.zeros((h, w), np.float32)
+    for face in faces:
+        lm = face * np.array([w, h], np.float32)
+        for spec in EYES.values():
+            eye_w = float(np.linalg.norm(lm[spec["corners"][0]] - lm[spec["corners"][1]]))
+            one = _poly_mask((h, w), lm[spec["contour"]])
+            k = 2 * max(1, round(0.05 * eye_w)) + 1
+            one = cv2.dilate(one, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            mask = np.maximum(mask, cv2.GaussianBlur(one, (0, 0), max(0.5, 0.02 * eye_w)))
+    return mask
+
