@@ -24,7 +24,7 @@ from PIL import Image
 
 from . import imageio
 from .registry import LicenceNotAccepted, Registry
-from .tools import backdrop_smooth, inpaint, mask_edit, reflection
+from .tools import backdrop_smooth, inpaint, mask_edit, reflection, scene
 from .tools import eyes as eye_tool
 from .tools import skin as skin_tool
 
@@ -177,11 +177,19 @@ class Engine:
 
     def thumbnail(self, path: str, edge: int = 240) -> dict:
         """Quick preview (base64 JPEG) for the film strip or for scanning through
-        photos, with the photo's full size so the viewer can lay it out."""
-        im, (w, h) = imageio.thumbnail(path, edge)
+        photos, with the photo's full size so the viewer can lay it out, and a
+        guess at studio backdrop vs outdoor (measured at scene.WORK_EDGE)."""
+        im, (w, h) = imageio.thumbnail(path, max(edge, scene.WORK_EDGE))
+        guess = scene.classify(np.asarray(im, np.float32) / 255)
+        im.thumbnail((edge, edge))
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=85 if edge <= 400 else 90)
-        return {"image": base64.b64encode(buf.getvalue()).decode(), "width": w, "height": h}
+        return {
+            "image": base64.b64encode(buf.getvalue()).decode(),
+            "width": w,
+            "height": h,
+            "scene": guess["mode"],
+        }
 
     def forget(self, path: str) -> dict:
         """Drop the stored edits of a photo taken out of the film strip."""

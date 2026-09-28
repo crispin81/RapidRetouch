@@ -746,3 +746,14 @@ button.primary {
   justify-content: center;
   border-radius: 50%;
 }
+
+.auto-tag {
+  margin-left: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(20, 21, 26, 0.35);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

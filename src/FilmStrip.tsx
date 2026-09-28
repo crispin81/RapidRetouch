@@ -5,6 +5,7 @@ export interface StripItem {
   path: string;
   thumb?: string; // base64 JPEG, loaded lazily
   edited: boolean; // settings differ from the defaults
+  scene?: "backdrop" | "outdoor"; // detected on import
 }
 
 interface Props {

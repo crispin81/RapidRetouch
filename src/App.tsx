@@ -323,6 +323,10 @@ export default function App() {
   const eyesRef = useRef(eyesParams);
   const skinRef = useRef(skinParams);
   const [outdoor, setOutdoor] = useState(false);
+  // Photos whose Backdrop/Outdoor mode was set by detection, not by the user
+  // (shown as "auto"); any click on the mode buttons makes it the user's.
+  const autoMode = useRef(new Set<string>());
+  const [modeIsAuto, setModeIsAuto] = useState(false);
   const outdoorRef = useRef(outdoor);
   /** Backdrop settings to send: none when the photo is set to Outdoor. */
   const backdropArg = () => (outdoorRef.current ? null : paramsRef.current);
@@ -467,6 +471,8 @@ export default function App() {
 
   // Reset buttons beside each group's heading.
   const toggleOutdoor = () => {
+    if (activePath.current) autoMode.current.delete(activePath.current);
+    setModeIsAuto(false);
     const next = !outdoorRef.current;
     outdoorRef.current = next;
     setOutdoor(next);
@@ -638,7 +644,9 @@ export default function App() {
     setFaces(null);
     setRemovals(0);
     setMaskEdits(0);
-    applySettings(settingsByPath.current.get(path) ?? ALL_DEFAULTS);
+    const saved = settingsByPath.current.get(path);
+    applySettings(saved ?? ALL_DEFAULTS);
+    setModeIsAuto(autoMode.current.has(path));
 
     // Back to the photo the engine already has: no need to wait.
     if (openedPath.current === path && openedInfo.current) {
@@ -649,11 +657,17 @@ export default function App() {
       return;
     }
     try {
-      const q = await call<{ image: string; width: number; height: number }>("thumbnail", {
+      const q = await call<{
+        image: string;
+        width: number;
+        height: number;
+        scene: "backdrop" | "outdoor";
+      }>("thumbnail", {
         path,
         edge: PREVIEW_EDGE,
       });
       if (activePath.current !== path) return;
+      if (!saved) applyDetectedScene(path, q.scene);
       setImage({
         path,
         width: q.width,
@@ -695,16 +709,37 @@ export default function App() {
     if (first !== image?.path) await loadImage(first);
   };
 
+  /** Set Backdrop/Outdoor from detection, for a photo the user hasn't set up. */
+  const applyDetectedScene = (path: string, detected: "backdrop" | "outdoor") => {
+    if (settingsByPath.current.has(path) && !autoMode.current.has(path)) return;
+    const wantOutdoor = detected === "outdoor";
+    autoMode.current.add(path);
+    if (activePath.current === path) {
+      setModeIsAuto(true);
+      if (outdoorRef.current !== wantOutdoor) {
+        outdoorRef.current = wantOutdoor;
+        setOutdoor(wantOutdoor);
+        if (openedPath.current === path) render();
+      }
+    } else {
+      const st = settingsByPath.current.get(path) ?? ALL_DEFAULTS;
+      settingsByPath.current.set(path, { ...st, outdoor: wantOutdoor });
+    }
+  };
+
   // Thumbnails, one at a time so they don't hold up the photo being edited.
   const loadingThumb = useRef(false);
   useEffect(() => {
     const next = strip.find((i) => !i.thumb);
     if (!next || loadingThumb.current || !engineReady) return;
     loadingThumb.current = true;
-    call<{ image: string }>("thumbnail", { path: next.path })
-      .then((r) =>
-        setStrip((items) => items.map((i) => (i.path === next.path ? { ...i, thumb: r.image } : i))),
-      )
+    call<{ image: string; scene: "backdrop" | "outdoor" }>("thumbnail", { path: next.path })
+      .then((r) => {
+        setStrip((items) =>
+          items.map((i) => (i.path === next.path ? { ...i, thumb: r.image, scene: r.scene } : i)),
+        );
+        applyDetectedScene(next.path, r.scene);
+      })
       .catch(() =>
         // Leave a placeholder rather than retrying forever.
         setStrip((items) => items.map((i) => (i.path === next.path ? { ...i, thumb: "" } : i))),
@@ -747,6 +782,8 @@ export default function App() {
     if (!copied) return;
     let pasted = 0;
     for (const path of selected) {
+      autoMode.current.delete(path); // a pasted mode is the user's choice
+      if (path === image?.path) setModeIsAuto(false);
       if (path === image?.path) {
         applySettings(copied);
         render();
@@ -1157,6 +1194,7 @@ export default function App() {
                 title="Studio backdrop: smooth, even out and adjust the backdrop"
               >
                 <Layers size={13} /> Backdrop
+                {!outdoor && modeIsAuto && <span className="auto-tag">auto</span>}
               </button>
               <button
                 className={outdoor ? "active" : ""}
@@ -1165,6 +1203,7 @@ export default function App() {
                 title="Outdoor: no backdrop step, for portraits not shot on a backdrop"
               >
                 <Sun size={13} /> Outdoor
+                {outdoor && modeIsAuto && <span className="auto-tag">auto</span>}
               </button>
             </div>
             <ResetButton
