@@ -1006,3 +1006,50 @@ button.primary {
 .presets__button.active svg {
   color: #16171d;
 }
+
+/* Floating brush toolbar over the photo (subject mask, Refine area). */
+.brushbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(20, 21, 26, 0.9);
+  border-radius: 8px;
+  backdrop-filter: blur(4px);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.brushbar__what {
+  color: #ffcc33;
+  margin-right: 4px;
+}
+
+.brushbar button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.brushbar__size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.brushbar__size input {
+  width: 110px;
+}
+
+.brushbar__done {
+  font-weight: 600;
+}
+
+.viewer__badge--low {
+  top: auto;
+  bottom: 56px;
+}

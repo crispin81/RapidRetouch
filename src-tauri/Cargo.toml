@@ -1,5 +1,5 @@
 [package]
-name = "retouch"
+name = "rapidretouch"
 version = "0.1.0"
 description = "AI-assisted studio portrait retouching"
 authors = ["Chris Cork"]
@@ -7,7 +7,7 @@ license = "AGPL-3.0-only"
 edition = "2021"
 
 [lib]
-name = "retouch_lib"
+name = "rapidretouch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

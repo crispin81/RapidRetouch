@@ -24,7 +24,7 @@ MANIFEST_DIR = Path(__file__).parent / "manifests"
 
 def data_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
-    path = Path(base) / "retouch-app"
+    path = Path(base) / "rapidretouch"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -154,7 +154,7 @@ class Registry:
         manifest = self.manifests[model_id]
         if not self.is_accepted(manifest):
             raise LicenceNotAccepted(manifest)
-        module = importlib.import_module(f"retouch_engine.adapters.{manifest.adapter}")
+        module = importlib.import_module(f"rapidretouch_engine.adapters.{manifest.adapter}")
         if manifest.source.get("kind") == "url":
             fetch_url(manifest, self.status)
         instance = module.Adapter(manifest, models_dir(), device)

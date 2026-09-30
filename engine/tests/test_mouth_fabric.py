@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from retouch_engine.tools import fabric, mouth
+from rapidretouch_engine.tools import fabric, mouth
 
 
 def test_teeth_mask_finds_pale_teeth_but_not_red_gums():

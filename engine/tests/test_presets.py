@@ -1,4 +1,4 @@
-from retouch_engine import presets
+from rapidretouch_engine import presets
 
 
 def test_save_list_replace_delete(tmp_path, monkeypatch):

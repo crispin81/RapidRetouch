@@ -1,7 +1,7 @@
 [project]
-name = "retouch-engine"
+name = "rapidretouch-engine"
 version = "0.1.0"
-description = "Image-processing and model-inference engine for the retouch app"
+description = "Image-processing and model-inference engine for RapidRetouch"
 readme = "README.md"
 authors = [
     { name = "Chris Cork", email = "info@chriscorkphotography.co.uk" }
@@ -44,7 +44,7 @@ dev = [
 ]
 
 [project.scripts]
-retouch-engine = "retouch_engine.cli:main"
+rapidretouch-engine = "rapidretouch_engine.cli:main"
 
 [tool.uv]
 # mediapipe depends on opencv-contrib-python, which installs into the same `cv2`

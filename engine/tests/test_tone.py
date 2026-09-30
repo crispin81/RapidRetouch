@@ -1,7 +1,7 @@
 import numpy as np
 
-from retouch_engine.tools import tone
-from retouch_engine.tools.colour import srgb_to_linear
+from rapidretouch_engine.tools import tone
+from rapidretouch_engine.tools.colour import srgb_to_linear
 
 
 def test_identity_curve_and_zero_ev_change_nothing():

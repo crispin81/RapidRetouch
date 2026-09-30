@@ -14,7 +14,9 @@ import io
 import json
 import os
 import sys
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
@@ -24,12 +26,13 @@ from PIL import Image
 
 from . import imageio, presets
 from .registry import LicenceNotAccepted, Registry
-from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, scene, tone
+from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, scene, tone
 from .tools import eyes as eye_tool
 from .tools import mouth as mouth_tool
 from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
+STAGE_CACHE_SIZE = 8  # preview stages kept: the current look's, plus a before view's
 METHODS = {
     "ping",
     "models",
@@ -41,6 +44,10 @@ METHODS = {
     "mask_paint",
     "undo_mask_edit",
     "clear_mask_edits",
+    "region_view",
+    "region_paint",
+    "undo_region_edit",
+    "clear_region_edits",
     "render",
     "remove",
     "undo_remove",
@@ -82,6 +89,8 @@ class Engine:
         self.alpha_preview_raw: np.ndarray | None = None
         self.alpha_preview: np.ndarray | None = None  # with the hand edits applied
         self.mask_edits: list[dict] = []
+        # The user's corrections to each area the tools find (see region_edit).
+        self.region_edits: dict[str, list[dict]] = {r: [] for r in region_edit.REGIONS}
         self.faces: list[np.ndarray] | None = None  # landmarks, as fractions of w/h
         self.mask_model: str | None = None
         # Prepared backdrop for the preview, keyed by what it depends on. Two slots,
@@ -108,10 +117,16 @@ class Engine:
         # The preview's clothes mask and crease gain, each (key, value), so
         # other sliders never recompute them.
         self._preview_cache: dict[str, tuple] = {}
-        self._full_crease: dict[str, tuple] = {}
+        self._full_found: dict[str, tuple] = {}
         # The preview before the tone step, by look: tone changes reuse it. Two
         # slots, so a hold-for-before render doesn't evict the current look.
         self._pretone: dict[str, np.ndarray] = {}
+        # The preview after each subject tool, by everything it depends on (see
+        # ``_staged``), least recently used first. Full precision (~34 MB
+        # each): in half precision, tools that make threshold decisions turned
+        # the rounding into visible differences depending on slider history.
+        self._stage_cache: dict[str, np.ndarray] = {}
+        self._parts: dict[str, np.ndarray] | None = None  # person-parts probabilities (see _clothes)
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
@@ -152,6 +167,7 @@ class Engine:
             self.sessions[str(self.path)] = {
                 "strokes": self.strokes,
                 "mask_edits": self.mask_edits,
+                "region_edits": self.region_edits,
                 "faces": self.faces,
             }
         self.status(f"Loading {Path(path).name}")
@@ -160,17 +176,20 @@ class Engine:
         self.preview = _proxy(self.image.rgb, PREVIEW_EDGE)
         self.alpha = self.alpha_preview_raw = self.alpha_preview = None
         self.mask_edits = []
+        self.region_edits = {r: [] for r in region_edit.REGIONS}
         self.faces = None
         self._full = {}
         self._eye_masks = {}
         self.backdrop_cache = {}
         self.strokes, self.filled_previews = [], []
-        self._preview_cache, self._full_crease = {}, {}
-        self._pretone = {}
+        self._preview_cache, self._full_found = {}, {}
+        self._pretone, self._stage_cache = {}, {}
+        self._parts = None
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
         if saved:
             self.mask_edits = saved["mask_edits"]
+            self.region_edits = saved.get("region_edits") or {r: [] for r in region_edit.REGIONS}
             self.faces = saved["faces"]
             base = self.preview
             for i, stroke in enumerate(saved["strokes"], 1):
@@ -186,6 +205,7 @@ class Engine:
             "preview": _jpeg_b64(self.preview),
             "removals": len(self.strokes),
             "mask_edits": len(self.mask_edits),
+            "region_edits": {r: len(v) for r, v in self.region_edits.items()},
         }
 
     def thumbnail(self, path: str, edge: int = 240) -> dict:
@@ -278,6 +298,60 @@ class Engine:
         self.mask_version += 1
         return self._mask_result()
 
+    def _area(self, region: str) -> np.ndarray:
+        """The area a Skin tab or the Clothes panel works on (0..1), at preview
+        size, with the user's corrections applied."""
+        rgb = self._edited_preview()
+        h, w = rgb.shape[:2]
+        found_key = (self.edit_version, self.mask_version)
+        if region == "face":
+            return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"])
+        self._ensure_mask()
+        if region == "clothes":
+            self._creases(rgb, self.alpha_preview, 0.0, self._preview_cache, found_key)
+            area = self._preview_cache["clothes"][1]
+            return np.zeros((h, w), np.float32) if area is None else area
+        people = self._body_people(rgb, self.alpha_preview, self._preview_cache, found_key)
+        area = np.zeros((h, w), np.float32)
+        for person in people:
+            area = np.maximum(area, cv2.resize(getattr(person, region), (w, h), interpolation=cv2.INTER_LINEAR))
+        return region_edit.apply(area, self.region_edits[region], (h, w))
+
+    def _region(self, region: str) -> str:
+        if region not in region_edit.REGIONS:
+            raise ValueError(f"unknown area {region!r}")
+        return region
+
+    def region_view(self, region: str) -> dict:
+        """The area (face, neck, body or clothes) shown in blue over the photo."""
+        self._require_image()
+        region = self._region(region)
+        shown = region_edit.overlay(self._edited_preview(), self._area(region))
+        return {"preview": _jpeg_b64(shown), "edits": len(self.region_edits[region])}
+
+    def region_paint(self, region: str, mode: str, points: list[list[float]], radius: float) -> dict:
+        """Correct an area: mode "add" takes the brushed part in, "remove" takes it out."""
+        self._require_image()
+        region = self._region(region)
+        if mode not in ("add", "remove"):
+            raise ValueError(f"unknown mode {mode!r}")
+        if not points:
+            raise ValueError("empty stroke")
+        self.region_edits[region] = self.region_edits[region] + [{"mode": mode, "points": points, "radius": radius}]
+        return self.region_view(region)
+
+    def undo_region_edit(self, region: str) -> dict:
+        self._require_image()
+        region = self._region(region)
+        self.region_edits[region] = self.region_edits[region][:-1]
+        return self.region_view(region)
+
+    def clear_region_edits(self, region: str) -> dict:
+        self._require_image()
+        region = self._region(region)
+        self.region_edits[region] = []
+        return self.region_view(region)
+
     def _mask_result(self) -> dict:
         shown = mask_edit.overlay(self._edited_preview(), self.alpha_preview)
         return {"preview": _jpeg_b64(shown), "mask_edits": len(self.mask_edits)}
@@ -293,7 +367,7 @@ class Engine:
         "model": None,
         "removals": True,
         "clothes": None,  # {"creases": 0..1}
-        "dodge_burn": None,  # {"amount": 0..1}
+        "dodge_burn": None,  # {"contour", "highlights", "shadows": 0..1}
         "tone": None,  # {"ev": stops, "curves": {...}}: the final grade
     }
 
@@ -371,19 +445,44 @@ class Engine:
         faces = self._ensure_faces()
         h, w = rgb.shape[:2]
         faces_px = [f[:, :2] * [w, h] for f in faces]
+        key = (key, json.dumps(self.region_edits["clothes"]))
         hit = cache.get("clothes")
         if not hit or hit[0] != key:
             self.status("Finding the clothes")
-            cache["clothes"] = (key, fabric.clothes_mask(rgb, alpha, faces_px))
+            cache["clothes"] = (
+                key,
+                fabric.clothes_mask(rgb, alpha, faces, self._clothes(), self.region_edits["clothes"]),
+            )
         mask = cache["clothes"][1]
         if mask is None:
             return None
         hit = cache.get("creases")
-        if not hit or hit[0] != (key, amount):
+        if not hit or hit[0] != key:
             self.status("Smoothing creases")
             fw = max((skin_tool.face_width(f) for f in faces_px), default=None)
-            cache["creases"] = ((key, amount), fabric.gain_map(rgb, amount * mask, fw))
-        return cache["creases"][1]
+            cache["creases"] = (key, fabric.measure(rgb, mask, fw))
+        corr = cache["creases"][1]
+        return corr.gain(amount) if corr else None
+
+    def _clothes(self) -> np.ndarray:
+        """Where the person-parts model sees clothing (0..1, on a copy up to
+        1024 px), found once per photo from the original."""
+        if self._parts is None:
+            manifest = self.registry.default_for("person_parts")
+            self.status(f"Loading {manifest.name} (first run downloads it)")
+            model = self.registry.get(manifest.id)
+            self.status("Telling skin from clothes")
+            self._parts = model.predict(self.image.rgb)
+        return self._parts["clothes"]
+
+    def _body_people(self, rgb: np.ndarray, alpha: np.ndarray, cache: dict, key) -> list:
+        """Each person's neck and body skin, found in ``rgb`` (the photo after
+        removals) inside the subject mask; cached in ``cache`` under ``key``."""
+        hit = cache.get("people")
+        if not hit or hit[0] != key:
+            self.status("Finding neck and body skin")
+            cache["people"] = (key, skin_tool.body_regions(rgb, self._ensure_faces(), alpha, self._clothes()))
+        return cache["people"][1]
 
     def _ensure_faces(self) -> list[np.ndarray]:
         if self.faces is None:
@@ -424,46 +523,119 @@ class Engine:
     def _edited_preview(self) -> np.ndarray:
         return self.filled_previews[-1] if self.filled_previews else self.preview
 
-    def _face_tools(self, rgb: np.ndarray, look: dict, steps: list[dict] | None = None) -> np.ndarray:
-        """Skin, dodge & burn, eyes and mouth, in that order, at whatever resolution ``rgb`` is.
-        With ``steps``, what was done is recorded there (for the export)."""
+    def _face_stages(self, look: dict, people) -> list[tuple[str, dict, object]]:
+        """Skin, neck & body, dodge & burn, eyes and mouth, in that order: the
+        ones this look uses, each (name, settings, run). ``run(rgb, steps)``
+        works at whatever resolution ``rgb`` is and, given ``steps``, records
+        what it did there (for the export). ``people()`` gives the neck and
+        body skin (see ``_body_people``); it's only called when a Neck or Body
+        slider is set."""
         landmarks = lambda: [self.registry.default_for("face_landmarks").provenance()]  # noqa: E731
-        face_p = skin_tool.RegionParams.from_dict((look["skin"] or {}).get("face"))
-        if look["skin"] and not face_p.is_noop():
-            rgb = skin_tool.apply(rgb, self._ensure_faces(), look["skin"].get("face"))
-            if steps is not None:
-                steps.append({"tool": "skin", "face": asdict(face_p), "faces": len(self.faces), "models": landmarks()})
-        amount = float((look["dodge_burn"] or {}).get("amount", 0))
-        if amount > 0:
-            rgb = dodge_burn.apply(rgb, self._ensure_faces(), amount)
-            if steps is not None:
-                steps.append({"tool": "dodge_burn", "amount": amount, "faces": len(self.faces), "models": landmarks()})
+        stages = []
+        skin = look["skin"] or {}
+        face_p = skin_tool.RegionParams.from_dict(skin.get("face"))
+        if not face_p.is_noop():
+            face_edits = list(self.region_edits["face"])
+
+            def run(rgb, steps):
+                rgb = skin_tool.apply(rgb, self._ensure_faces(), skin.get("face"), face_edits)
+                if steps is not None:
+                    steps.append({"tool": "skin", "face": asdict(face_p), "area_edits": face_edits,
+                                  "faces": len(self.faces), "models": landmarks()})
+                return rgb
+            stages.append(("skin", {"params": asdict(face_p), "edits": face_edits}, run))
+        neck_p = skin_tool.RegionParams.from_dict(skin.get("neck"))
+        body_p = skin_tool.RegionParams.from_dict(skin.get("body"))
+        if not (neck_p.is_noop() and body_p.is_noop()):
+            body_edits = {r: list(self.region_edits[r]) for r in ("neck", "body")}
+
+            def run(rgb, steps):
+                rgb = skin_tool.apply_body(rgb, people(), skin.get("neck"), skin.get("body"), body_edits)
+                if steps is not None:
+                    steps.append({
+                        "tool": "skin_body",
+                        "neck": asdict(neck_p),
+                        "body": asdict(body_p),
+                        "area_edits": body_edits,
+                        "faces": len(self.faces),
+                        "models": [self.registry.manifests[self.mask_model].provenance(), *landmarks()],
+                    })
+                return rgb
+            stages.append(("skin_body", {"neck": asdict(neck_p), "body": asdict(body_p), "edits": body_edits}, run))
+        db_p = dodge_burn.Params.from_dict(look["dodge_burn"])
+        if not db_p.is_noop():
+            def run(rgb, steps):
+                rgb = dodge_burn.apply(rgb, self._ensure_faces(), db_p)
+                if steps is not None:
+                    steps.append({"tool": "dodge_burn", "params": asdict(db_p), "faces": len(self.faces), "models": landmarks()})
+                return rgb
+            stages.append(("dodge_burn", asdict(db_p), run))
         eyes_p = eye_tool.Params.from_dict(look["eyes"] or {})
         if look["eyes"] is not None and not eyes_p.is_noop():
-            rgb = eye_tool.apply(rgb, self._ensure_faces(), eyes_p)
-            if steps is not None:
-                steps.append({"tool": "eyes", "params": asdict(eyes_p), "faces": len(self.faces), "models": landmarks()})
+            def run(rgb, steps):
+                rgb = eye_tool.apply(rgb, self._ensure_faces(), eyes_p)
+                if steps is not None:
+                    steps.append({"tool": "eyes", "params": asdict(eyes_p), "faces": len(self.faces), "models": landmarks()})
+                return rgb
+            stages.append(("eyes", asdict(eyes_p), run))
         mouth_p = mouth_tool.Params.from_dict(look["mouth"])
         if look["mouth"] is not None and not mouth_p.is_noop():
-            rgb = mouth_tool.apply(rgb, self._ensure_faces(), mouth_p)
-            if steps is not None:
-                steps.append({"tool": "mouth", "params": asdict(mouth_p), "faces": len(self.faces), "models": landmarks()})
+            def run(rgb, steps):
+                rgb = mouth_tool.apply(rgb, self._ensure_faces(), mouth_p)
+                if steps is not None:
+                    steps.append({"tool": "mouth", "params": asdict(mouth_p), "faces": len(self.faces), "models": landmarks()})
+                return rgb
+            stages.append(("mouth", asdict(mouth_p), run))
+        return stages
+
+    def _face_tools(self, rgb: np.ndarray, look: dict, people, steps: list[dict] | None = None) -> np.ndarray:
+        """Every face and body tool this look uses, in order, uncached (the
+        full-resolution pipeline)."""
+        for _name, _settings, run in self._face_stages(look, people):
+            rgb = run(rgb, steps)
         return rgb
 
+    def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]]) -> np.ndarray:
+        """Run ``stages`` on ``rgb`` (a callable, only called if needed),
+        reusing the output of every stage whose settings, and whose earlier
+        stages' settings, are unchanged. Moving one tool's slider then reruns
+        only that tool and the ones after it."""
+        keys, key = [], base_key
+        for name, settings, _run in stages:
+            key = json.dumps([key, name, settings], sort_keys=True)
+            keys.append(key)
+        start, img = 0, None
+        for i in range(len(stages) - 1, -1, -1):
+            hit = self._stage_cache.pop(keys[i], None)
+            if hit is not None:
+                self._stage_cache[keys[i]] = hit  # most recently used
+                start, img = i + 1, hit
+                break
+        if img is None:
+            img = rgb()
+        for i in range(start, len(stages)):
+            img = stages[i][2](img, None)
+            self._stage_cache[keys[i]] = img
+            while len(self._stage_cache) > STAGE_CACHE_SIZE:
+                self._stage_cache.pop(next(iter(self._stage_cache)))
+        return img
+
     def _render(self, look: dict) -> np.ndarray:
-        """Preview of the full pipeline: removals, backdrop smoothing, clothes
-        creases, skin, dodge & burn, eyes, mouth, then the tone (EV, curves).
+        """Preview of the full pipeline: removals, backdrop smoothing, skin,
+        neck & body, dodge & burn, eyes, mouth, clothes creases, then the tone
+        (EV, curves).
 
         The subject tools come after the backdrop: they only touch the subject,
         where the backdrop step changes nothing, so their sliders never force a
         backdrop recompute. Dodge & burn follows skin smoothing, so smoothing
-        never flattens the shaping.
+        never flattens the shaping. Each subject tool's output is kept (see
+        ``_staged``), so a slider reruns only its own tool and those after it.
 
         Tone is last and per-pixel, so the image before it is kept: moving the
         exposure or the curve only re-applies the tone.
         """
         key = json.dumps(
-            [{**look, "tone": None}, self.edit_version, self.mask_version], sort_keys=True
+            [{**look, "tone": None}, self.edit_version, self.mask_version, self.region_edits], sort_keys=True
         )
         img = self._pretone.pop(key, None)  # re-inserted below: LRU order
         if img is None:
@@ -475,15 +647,35 @@ class Engine:
 
     def _render_retouch(self, look: dict) -> np.ndarray:
         """The preview up to (not including) the tone."""
-        out = self._render_backdrop(look["backdrop"], look["model"], look["removals"])
+        found_key = (self.edit_version if look["removals"] else -1, self.mask_version)
+
+        def base():
+            return self._edited_preview() if look["removals"] else self.preview
+
+        def backdrop():
+            return self._render_backdrop(look["backdrop"], look["model"], look["removals"])
+
+        def people():
+            self._ensure_mask()
+            return self._body_people(base(), self.alpha_preview, self._preview_cache, found_key)
+
+        stages = self._face_stages(look, people)
+        # Creases last: they only touch the clothes and the other tools only
+        # the skin, so the order doesn't show, and the Creases slider then
+        # never reruns them.
         amount = self._crease_amount(look)
         if amount > 0:
-            self._ensure_mask()
-            key = (self.edit_version if look["removals"] else -1, self.mask_version)
-            base = self._edited_preview() if look["removals"] else self.preview
-            gain = self._creases(base, self.alpha_preview, amount, self._preview_cache, key)
-            out = fabric.apply_gain(out, gain)
-        return self._face_tools(out, look)
+            def creases(rgb, _steps):
+                self._ensure_mask()
+                gain = self._creases(base(), self.alpha_preview, amount, self._preview_cache, found_key)
+                return fabric.apply_gain(rgb, gain)
+            stages.append(("creases", {"amount": amount}, creases))
+        # Everything the stages' input depends on: the backdrop step's settings
+        # and the edits (removals, mask).
+        base_key = json.dumps(
+            [look["backdrop"], look["model"], look["removals"], self.edit_version, self.mask_version], sort_keys=True
+        )
+        return self._staged(backdrop, base_key, stages)
 
     def _render_backdrop(
         self, backdrop: dict | None, model: str | None, removals: bool = True
@@ -524,7 +716,7 @@ class Engine:
         # the crop, and moving the exposure or curve never re-renders the photo.
         untoned = {**look, "tone": None}
         key = json.dumps(
-            [untoned, self.strokes, self.mask_edits, self.mask_model], sort_keys=True
+            [untoned, self.strokes, self.mask_edits, self.region_edits, self.mask_model], sort_keys=True
         )
         cached = self._full.get("result")
         if cached and cached[0] == key:
@@ -621,16 +813,29 @@ class Engine:
                 }
             )
 
+        def people():
+            self._ensure_mask(model)
+            key = json.dumps([self.mask_model, self.mask_edits])  # the mask may only now be loaded
+            alpha = self._cached("alpha", key, edited_alpha)
+            return self._body_people(edited, alpha, self._full_found, (removal_key, key))
+
+        if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")):
+            self.status("Retouching the face at full resolution")
+        rgb = self._face_tools(rgb, look, people, steps)
+
+        # Creases last, as in the preview (see ``_render_retouch``).
         amount = self._crease_amount(look)
         if amount > 0:
             self._ensure_mask(model)
-            alpha = self._cached("alpha", json.dumps([self.mask_model, self.mask_edits]), edited_alpha)
-            gain = self._creases(edited, alpha, amount, self._full_crease, (removal_key, mask_key))
+            key = json.dumps([self.mask_model, self.mask_edits])
+            alpha = self._cached("alpha", key, edited_alpha)
+            gain = self._creases(edited, alpha, amount, self._full_found, (removal_key, key))
             rgb = fabric.apply_gain(rgb, gain)
             steps.append(
                 {
                     "tool": "clothes_creases",
                     "amount": amount,
+                    "area_edits": self.region_edits["clothes"],
                     "models": [
                         self.registry.manifests[self.mask_model].provenance(),
                         self.registry.default_for("face_landmarks").provenance(),
@@ -638,9 +843,6 @@ class Engine:
                 }
             )
 
-        if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")):
-            self.status("Retouching the face at full resolution")
-        rgb = self._face_tools(rgb, look, steps)
         if not tone.is_noop(look["tone"]):
             rgb = tone.apply(rgb, look["tone"])
             steps.append({"tool": "tone", "params": look["tone"]})
@@ -658,37 +860,58 @@ def serve() -> None:
     proto = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
+    lock = threading.Lock()
+
     def emit(msg: dict) -> None:
-        proto.write(json.dumps(msg) + "\n")
-        proto.flush()
+        with lock:
+            proto.write(json.dumps(msg) + "\n")
+            proto.flush()
 
     engine = Engine(emit)
+    # Thumbnails only read the file, so they're made on a thread of their own:
+    # loading a whole shoot into the film strip then never holds up the photo
+    # being edited (each is ~0.3 s of RAW decoding, much of it outside the GIL).
+    # One thread: a second made thumbnails faster but slowed renders by ~0.1 s.
+    background = ThreadPoolExecutor(max_workers=1)
     emit({"event": "ready"})
     for line in sys.stdin:
         if not line.strip():
             continue
-        req_id = None
         try:
             req = json.loads(line)
-            req_id = req.get("id")
-            method = req["method"]
-            if method not in METHODS:
-                raise ValueError(f"unknown method {method!r}")
-            result = getattr(engine, method)(**req.get("params", {}))
-            emit({"id": req_id, "result": result})
-        except LicenceNotAccepted as e:
-            emit(
-                {
-                    "id": req_id,
-                    "error": {
-                        "message": str(e),
-                        "kind": "licence",
-                        "model": e.manifest.id,
-                        "licence": e.manifest.licence,
-                        "licence_url": e.manifest.licence_url,
-                    },
-                }
-            )
         except Exception as e:
-            traceback.print_exc()
-            emit({"id": req_id, "error": {"message": str(e)}})
+            emit({"id": None, "error": {"message": str(e)}})
+            continue
+        if req.get("method") in BACKGROUND:
+            background.submit(_handle, engine, req, emit)
+        else:
+            _handle(engine, req, emit)
+
+
+BACKGROUND = {"thumbnail"}  # methods that touch no engine state
+
+
+def _handle(engine: Engine, req: dict, emit) -> None:
+    req_id = req.get("id")
+    try:
+        method = req["method"]
+        if method not in METHODS:
+            raise ValueError(f"unknown method {method!r}")
+        result = getattr(engine, method)(**req.get("params", {}))
+        emit({"id": req_id, "result": result})
+    except LicenceNotAccepted as e:
+        emit(
+            {
+                "id": req_id,
+                "error": {
+                    "message": str(e),
+                    "kind": "licence",
+                    "model": e.manifest.id,
+                    "licence": e.manifest.licence,
+                    "licence_url": e.manifest.licence_url,
+                },
+            }
+        )
+    except Exception as e:
+        traceback.print_exc()
+        emit({"id": req_id, "error": {"message": str(e)}})

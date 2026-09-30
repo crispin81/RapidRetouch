@@ -1333,6 +1333,53 @@ wheels = [
 ]
 
 [[package]]
+name = "rapidretouch-engine"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "einops" },
+    { name = "huggingface-hub" },
+    { name = "kornia" },
+    { name = "mediapipe" },
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
+    { name = "pillow" },
+    { name = "pyyaml" },
+    { name = "rawpy" },
+    { name = "tifffile" },
+    { name = "timm" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops", specifier = ">=0.8.2" },
+    { name = "huggingface-hub", specifier = ">=0.36.2" },
+    { name = "kornia", specifier = ">=0.8.3" },
+    { name = "mediapipe", specifier = "<1" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "opencv-python-headless", specifier = ">=5.0.0.93" },
+    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rawpy", specifier = ">=0.27.1" },
+    { name = "tifffile", specifier = ">=2026.9.20" },
+    { name = "timm", specifier = ">=1.0.30" },
+    { name = "torch", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torchvision", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "transformers", specifier = "<5" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+
+[[package]]
 name = "rawpy"
 version = "0.27.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1476,53 +1523,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
 ]
-
-[[package]]
-name = "retouch-engine"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "einops" },
-    { name = "huggingface-hub" },
-    { name = "kornia" },
-    { name = "mediapipe" },
-    { name = "numpy" },
-    { name = "opencv-python-headless" },
-    { name = "pillow" },
-    { name = "pyyaml" },
-    { name = "rawpy" },
-    { name = "tifffile" },
-    { name = "timm" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "einops", specifier = ">=0.8.2" },
-    { name = "huggingface-hub", specifier = ">=0.36.2" },
-    { name = "kornia", specifier = ">=0.8.3" },
-    { name = "mediapipe", specifier = "<1" },
-    { name = "numpy", specifier = ">=2.5.3" },
-    { name = "opencv-python-headless", specifier = ">=5.0.0.93" },
-    { name = "pillow", specifier = ">=12.3.0" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "rawpy", specifier = ">=0.27.1" },
-    { name = "tifffile", specifier = ">=2026.9.20" },
-    { name = "timm", specifier = ">=1.0.30" },
-    { name = "torch", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "torchvision", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "transformers", specifier = "<5" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "safetensors"

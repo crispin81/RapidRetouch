@@ -123,12 +123,27 @@ WHITES_SKIN_SHARE = 0.3  # whites are aimed at this share of the nearby skin's c
 WHITES_TARGET_L = 95.0
 WHITES_LIFT = 0.55  # share of the way to WHITES_TARGET_L lifted at full
 WHITES_MAX_LIFT = 25.0
-WHITES_STRENGTH = 0.5  # overall scale of the slider (halved at the user's request)
+WHITES_STRENGTH = 0.625  # overall scale of the slider (halved at the user's request, then +25%)
 WHITES_FEATHER = 0.04  # eye widths: the whites edit fades out toward lids, iris and corners
+WHITES_LID_FADE = 0.085  # eye widths: fades in from the lids, where the white is shaded
+# A real white is brightest beside the iris and falls off into the corners; an
+# even lift right out to them looks painted on. Distance from the iris centre,
+# in iris radii: full strength up to the first, WHITES_CORNER_KEEP by the second.
+# (Both fades 15% shorter than first tried, at the user's request.)
+WHITES_TAPER = (1.4, 2.4)
+WHITES_CORNER_KEEP = 0.1
+WHITES_SHADING = 2.0  # lift scales with (brightness / the eye's white)^this: shading kept
 WHITES_NOT_LASH = (0.3, 0.7)  # share of this eye's bright white: darker is lashes, not white
 VEIN_SCALES = (0.006, 0.012)  # vein half-widths the detector looks for
-VEIN_LOW, VEIN_HIGH = 0.4, 1.5  # redness-line strength ramp (Lab a units)
-VEIN_MIN_RED = (2.0, 6.0)  # how much redder than the white around it
+# Calibrated on real veins (P1246006, P1256101): they score ~0.3-0.4 as lines
+# and are ~1.5-2.5 Lab a redder than the white around them.
+VEIN_LOW, VEIN_HIGH = 0.12, 0.5  # redness-line strength ramp (Lab a units)
+VEIN_MIN_RED = (0.6, 2.2)  # how much redder than the white around it
+VEIN_LID_MARGIN = 0.012  # eye widths inside the lids (the lid rim is red too)
+VEIN_CARUNCLE_CLEAR = (0.05, 0.1)  # nearer the inner corner than the whites edit goes
+VEIN_FULL = 2.5  # the vein map is scaled by this: half-detected veins are fully replaced
+REDNESS_CLEAN_PCT = 20  # the white's cleanest colour: this percentile of its redness (Lab a)
+REDNESS_SHARE = 0.85  # share of the white's pinkness above that taken out at full
 VEIN_REFERENCE = 0.05  # neighbourhood the clean white is taken from
 IRIS_EDGE_KEEP = 0.8  # outer part of the iris (the dark limbal ring) is kept
 IRIS_DETAIL = (0.012, 0.08)  # fibre band: finer is noise, coarser is shading
@@ -313,8 +328,11 @@ def _wrinkle_lift(
     eye_w: float,
     scales: tuple[float, ...] = WRINKLE_SCALES,
     fold_keep: float = FOLD_KEEP,
+    line_ramp: tuple[float, float] = (LINE_LOW, LINE_HIGH),
 ) -> np.ndarray:
-    """Lab L increment that fills the lines in ``zone`` at full strength."""
+    """Lab L increment that fills the lines in ``zone`` at full strength.
+    ``line_ramp``: how line-like a crease must be to be filled (softer
+    creases, like those across a smiling cheek, need a gentler ramp)."""
     s_max = max(0.7, scales[-1] * eye_w)
     k = 2 * round(2.5 * s_max) + 1
     # Closing removes dark features narrower than the kernel: the skin as it
@@ -325,7 +343,7 @@ def _wrinkle_lift(
     # through it instead of being filled in along with the line.
     depth = np.clip(filled - L, 0, None)
     depth = blur(depth, max(0.5, 0.6 * scales[0] * eye_w))
-    weight = _smoothstep(_line_strength(L, eye_w, scales), LINE_LOW, LINE_HIGH)
+    weight = _smoothstep(_line_strength(L, eye_w, scales), *line_ramp)
     kd = 2 * round(1.5 * s_max) + 1
     weight = max_filter(weight, kd)
     weight = blur(weight, s_max)
@@ -402,7 +420,12 @@ def _remove_veins(lab: np.ndarray, sclera: np.ndarray, eye_w: float, amount: flo
     around them. The line detector runs on redness (Lab a), so the iris edge,
     lash shadows and the white's own shading don't count; each vein pixel then
     takes the colour and brightness of the clean white beside it (measured
-    with the veins left out), so it vanishes rather than becoming a pale line."""
+    with the veins left out), so it vanishes rather than becoming a pale line.
+    Brightness is only ever raised, so no grey patches appear.
+
+    (Repainting veins with LaMa was tried and removed: it filled them with the
+    white around them, which near the corners is already pink, and left the
+    eye as red as before, while taking 2-3 s.)"""
     a = np.ascontiguousarray(lab[..., 1])
     hard = (sclera > 0.05).astype(np.float32)
     # A red ridge in a is a dark valley in -a: reuse the wrinkle line detector.
@@ -416,7 +439,19 @@ def _remove_veins(lab: np.ndarray, sclera: np.ndarray, eye_w: float, amount: flo
     clean = masked_blur(lab, hard * (1 - vein) ** 2, max(0.7, VEIN_REFERENCE * eye_w))
     target = clean - lab
     target[..., 0] = np.clip(target[..., 0], 0, None)  # only ever brighten
-    lab += (amount * vein * sclera)[..., None] * target
+    # A clearly detected vein is fully replaced at full strength: the vein
+    # map ramps up gradually, and used as it is it only ever faded veins.
+    weight = np.clip(VEIN_FULL * vein, 0, 1)
+    lab += (amount * weight * sclera)[..., None] * target
+    # Bloodshot whites are pink all over, not just along the veins: pull the
+    # white's redness toward its own cleanest part (colour only; brightness
+    # and the white's shading stay as they are).
+    inside = sclera > 0.5
+    if inside.sum() > 20:
+        a = lab[..., 1]
+        clean_a = float(np.percentile(a[inside], REDNESS_CLEAN_PCT))
+        excess = blur(np.clip(a - clean_a, 0, None), max(0.5, VEIN_SCALES[-1] * eye_w))
+        lab[..., 1] -= amount * REDNESS_SHARE * sclera * excess
 
 
 def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Params) -> None:
@@ -450,10 +485,17 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
     sclera = opening * sclera_ring * _smoothstep(from_inner, *CARUNCLE_CLEAR) * (1 - catch)
 
     if p.veins > 0:
-        _remove_veins(lab, sclera, eye_w, p.veins)
+        # Veins gather toward the corners and lids, where the whites' own mask
+        # has already faded: this one reaches closer, stopping short of the red
+        # rim of the lids.
+        opening_veins = _inner_feather(opening_hard, VEIN_LID_MARGIN * eye_w)
+        vein_zone = opening_veins * sclera_ring * _smoothstep(from_inner, *VEIN_CARUNCLE_CLEAR) * (1 - catch)
+        _remove_veins(lab, vein_zone, eye_w, p.veins)
 
     if p.whites > 0:
-        s = WHITES_STRENGTH * p.whites * blur(sclera, max(0.5, WHITES_FEATHER * eye_w)) * opening
+        taper = 1 - (1 - WHITES_CORNER_KEEP) * _smoothstep(d / max(r, 1.0), *WHITES_TAPER)
+        lids = _inner_feather(opening_hard, WHITES_LID_FADE * eye_w)
+        s = WHITES_STRENGTH * p.whites * blur(sclera, max(0.5, WHITES_FEATHER * eye_w)) * lids * taper
         Lw = lab[..., 0].copy()
         # The skin around the eye (outside the opening, not lashes or shadow)
         # carries the light's colour.
@@ -461,11 +503,15 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
         skin_ab = np.median(lab[around][:, 1:], axis=0) if around.sum() > 50 else np.zeros(2)
         target_ab = (WHITES_SKIN_SHARE * skin_ab).astype(np.float32)
         lab[..., 1:] += (WHITES_DESATURATE * s)[..., None] * (target_ab - lab[..., 1:])
-        lift = np.clip((WHITES_TARGET_L - Lw) * WHITES_LIFT, 0, WHITES_MAX_LIFT)
         # Lashes are told apart by being much darker than this eye's own white,
         # not by a fixed level: the shaded side of a white can be darker than a
         # lash on a brighter photo.
         white_L = np.percentile(Lw[sclera > 0.5], 85) if (sclera > 0.5).sum() > 20 else 60.0
+        # The lift is set by the eye's bright white and shared out in proportion
+        # to brightness, so the white's own shading survives (lifting every
+        # pixel toward one level flattens it).
+        lift = np.clip((WHITES_TARGET_L - white_L) * WHITES_LIFT, 0, WHITES_MAX_LIFT)
+        lift = lift * np.clip(Lw / max(white_L, 1.0), 0, 1) ** WHITES_SHADING
         not_lash = _smoothstep(Lw, WHITES_NOT_LASH[0] * white_L, WHITES_NOT_LASH[1] * white_L)
         lab[..., 0] += s * not_lash * lift
 

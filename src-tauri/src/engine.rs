@@ -23,9 +23,9 @@ pub struct Engine {
 }
 
 /// Where the engine's uv project lives. Dev builds use the repo checkout;
-/// RETOUCH_ENGINE_DIR overrides it. (Packaging will bundle it — not done yet.)
+/// RAPIDRETOUCH_ENGINE_DIR overrides it. (Packaging will bundle it — not done yet.)
 fn engine_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RETOUCH_ENGINE_DIR") {
+    if let Ok(dir) = std::env::var("RAPIDRETOUCH_ENGINE_DIR") {
         return PathBuf::from(dir);
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine")
@@ -37,7 +37,7 @@ impl Engine {
         let mut child = Command::new("uv")
             .args(["run", "--project"])
             .arg(&dir)
-            .args(["retouch-engine", "serve"])
+            .args(["rapidretouch-engine", "serve"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

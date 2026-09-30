@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -36,6 +36,7 @@ import {
   jpegSrc,
   onEngineEvent,
 } from "./api";
+import BrushBar from "./BrushBar";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
 import CurveEditor, { IDENTITY, Point } from "./CurveEditor";
@@ -51,7 +52,7 @@ interface PhotoSettings {
   eyes: EyesParams;
   skin: SkinParams;
   mouth: MouthParams;
-  dodgeBurn: number; // sculpt strength 0..1
+  dodgeBurn: DodgeBurnParams;
   creases: number; // clothes crease smoothing 0..1
   tone: Tone;
 }
@@ -66,7 +67,7 @@ const sameSettings = (a: PhotoSettings, b: PhotoSettings) => sameValues(a, b);
 const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
 // No tutorial video yet: the banner does nothing until this is set.
 const TUTORIAL_VIDEO_URL: string | null = null;
-const TUTORIAL_DISMISSED_KEY = "retouch.tutorialDismissed";
+const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
 // Scanning: a photo is only opened and processed after this long on it (or as
@@ -96,8 +97,8 @@ const SLIDERS: {
   {
     key: "exposure",
     label: "Brightness",
-    min: -3,
-    max: 1,
+    min: -2.5,
+    max: 2.5,
     step: 0.05,
     hint: "Backdrop exposure in stops; the subject is untouched (e.g. turn a white backdrop grey)",
     format: (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(2)} EV`,
@@ -164,12 +165,30 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
 ];
 
 // "compare": holding a panel's before button — the result without that step.
-type View = "result" | "before" | "mask" | "compare";
-type Step = "removals" | "tone" | "backdrop" | "clothes" | "skin" | "dodge_burn" | "eyes" | "mouth";
+// "area": a Refine area brush — a tool's area (face, neck, body skin or
+// clothes) shown in blue over the photo, corrected by painting.
+type View = "result" | "before" | "mask" | "compare" | "area";
+type Area = "face" | "neck" | "body" | "clothes";
+const AREA_NAMES: Record<Area, string> = { face: "Face skin", neck: "Neck skin", body: "Body skin", clothes: "Clothes" };
+type Step =
+  | "removals"
+  | "tone"
+  | "backdrop"
+  | "clothes"
+  | "skin"
+  | "skin_face"
+  | "skin_neck"
+  | "skin_body"
+  | "dodge_burn"
+  | "eyes"
+  | "mouth";
 const STEP_NAMES: Record<Step, string> = {
   removals: "removals",
   backdrop: "backdrop",
   skin: "skin",
+  skin_face: "face skin",
+  skin_neck: "neck skin",
+  skin_body: "body skin",
   eyes: "eyes",
   mouth: "mouth",
   clothes: "clothes",
@@ -177,11 +196,30 @@ const STEP_NAMES: Record<Step, string> = {
   dodge_burn: "dodge & burn",
 };
 
-/** A look with one step left out, for that step's hold-for-before view. */
-const withoutStep = (look: Record<string, unknown>, step: Step): Record<string, unknown> =>
-  step === "removals"
-    ? { ...look, [step]: false }
-    : { ...look, [step]: null };
+/** Press-and-hold handlers. The pointer is captured while pressed, so only
+ * releasing it ends the hold: when zoomed in, the full-resolution tile landing
+ * a few seconds later updated the page, which WebKit could report as the
+ * pointer leaving the button, and the view reverted mid-hold. */
+const holdHandlers = (start: () => void, end: () => void) => ({
+  onPointerDown: (e: PointerEvent<HTMLButtonElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    start();
+  },
+  onPointerUp: end,
+  onPointerCancel: end,
+  onLostPointerCapture: end,
+});
+
+/** A look with one step left out, for that step's hold-for-before view. The
+ * Skin panel compares one region at a time (Face, Neck or Body). */
+const withoutStep = (look: Record<string, unknown>, step: Step): Record<string, unknown> => {
+  if (step === "removals") return { ...look, removals: false };
+  if (step === "skin_face" || step === "skin_neck" || step === "skin_body") {
+    const region = step.slice("skin_".length);
+    return { ...look, skin: { ...((look.skin as Record<string, unknown>) ?? {}), [region]: null } };
+  }
+  return { ...look, [step]: null };
+};
 
 // Brush modes: the Remove panel's (LaMa fill, glasses reflection, patch).
 type BrushMode = "fill" | "reflection" | "patch";
@@ -191,6 +229,17 @@ const BRUSH_COLOURS: Record<BrushMode, string | undefined> = {
   patch: undefined,
 };
 
+type DodgeBurnParams = { contour: number; highlights: number; shadows: number };
+const DODGE_BURN_DEFAULTS: DodgeBurnParams = { contour: 0, highlights: 0, shadows: 0 };
+const DODGE_BURN_SLIDERS: { key: keyof DodgeBurnParams; label: string; hint: string }[] = [
+  {
+    key: "contour",
+    label: "Contour",
+    hint: "Shape the face: brighten the forehead, nose bridge, cheekbones and chin, and deepen under the cheekbones, beside the nose and along the jaw and temples",
+  },
+  { key: "highlights", label: "Highlights", hint: "Brighten the highlights already on the face" },
+  { key: "shadows", label: "Shadows", hint: "Deepen the shadows already on the face: the contours, not the whole shaded side" },
+];
 const SKIN_REGION_DEFAULTS: SkinRegion = {
   blemishes: 0,
   smooth: 0,
@@ -201,6 +250,7 @@ const SKIN_REGION_DEFAULTS: SkinRegion = {
   frown_lines: 0,
   smile_lines: 0,
   chin_lines: 0,
+  neck_lines: 0,
 };
 const WRINKLE_SLIDERS: { key: keyof SkinRegion; label: string; hint: string }[] = [
   { key: "forehead_lines", label: "Forehead lines", hint: "Soften horizontal lines across the forehead" },
@@ -235,7 +285,7 @@ const ALL_DEFAULTS: PhotoSettings = {
   eyes: EYE_DEFAULTS,
   skin: SKIN_DEFAULTS,
   mouth: MOUTH_DEFAULTS,
-  dodgeBurn: 0,
+  dodgeBurn: DODGE_BURN_DEFAULTS,
   creases: 0,
   tone: TONE_DEFAULTS,
 };
@@ -256,7 +306,12 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean): PhotoSett
       body: { ...ALL_DEFAULTS.skin.body, ...obj(skin.body) },
     },
     mouth: { ...ALL_DEFAULTS.mouth, ...obj(saved.mouth) },
-    dodgeBurn: num(saved.dodgeBurn, 0),
+    // Presets saved before the split had one Sculpt number: it was the
+    // strength of today's Highlights and Shadows together.
+    dodgeBurn:
+      typeof saved.dodgeBurn === "number"
+        ? { ...DODGE_BURN_DEFAULTS, highlights: saved.dodgeBurn, shadows: saved.dodgeBurn }
+        : { ...DODGE_BURN_DEFAULTS, ...obj(saved.dodgeBurn) },
     creases: num(saved.creases, 0),
     tone: {
       ev: num(tone.ev, 0),
@@ -265,10 +320,10 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean): PhotoSett
   };
 }
 
-const SKIN_TABS: { key: SkinTab; label: string; ready: boolean }[] = [
-  { key: "face", label: "Face", ready: true },
-  { key: "neck", label: "Neck", ready: false },
-  { key: "body", label: "Body", ready: false },
+const SKIN_TABS: { key: SkinTab; label: string }[] = [
+  { key: "face", label: "Face" },
+  { key: "neck", label: "Neck" },
+  { key: "body", label: "Body" },
 ];
 const SKIN_SLIDERS: {
   key: keyof SkinRegion;
@@ -285,7 +340,12 @@ const SKIN_SLIDERS: {
     hint: "Soften pores, most visible ones most; the skin's finest grain is kept so it never looks plastic",
     min: 0,
   },
-  { key: "even", label: "Even tone", hint: "Move red or blotchy patches toward the person's own skin tone", min: 0 },
+  {
+    key: "even",
+    label: "Even tone",
+    hint: "Move red or blotchy patches toward the skin's own tone (on the neck and body, toward that area's average, so a made-up face isn't copied onto them)",
+    min: 0,
+  },
   {
     key: "shine",
     label: "Shine",
@@ -319,7 +379,7 @@ const BRUSH = { min: 0.002, max: 0.05, step: 0.001, default: 0.01 };
 const clampBrush = (r: number) => Math.min(BRUSH.max, Math.max(BRUSH.min, r));
 
 // Remembered across launches; storage can be unavailable, so never let it throw.
-const LAST_DIR_KEY = "retouch.lastDir";
+const LAST_DIR_KEY = "rapidretouch.lastDir";
 const readLastDir = (): string | null => {
   try {
     return localStorage.getItem(LAST_DIR_KEY);
@@ -410,7 +470,7 @@ export default function App() {
   const [eyesParams, setEyesParams] = useState<EyesParams>(EYE_DEFAULTS);
   const [skinParams, setSkinParams] = useState<SkinParams>(SKIN_DEFAULTS);
   const [mouthParams, setMouthParams] = useState<MouthParams>(MOUTH_DEFAULTS);
-  const [dodgeBurn, setDodgeBurn] = useState(0);
+  const [dodgeBurn, setDodgeBurn] = useState<DodgeBurnParams>(DODGE_BURN_DEFAULTS);
   const [creases, setCreases] = useState(0);
   // Folded sidebar panels, remembered between sessions.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -459,6 +519,11 @@ export default function App() {
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
   const [maskEdits, setMaskEdits] = useState(0);
   const [maskPending, setMaskPending] = useState(false);
+  const [area, setArea] = useState<Area | null>(null);
+  const [areaImg, setAreaImg] = useState<string | null>(null);
+  const [areaEdits, setAreaEdits] = useState(0);
+  const [areaMode, setAreaMode] = useState<"add" | "remove">("remove");
+  const [areaPending, setAreaPending] = useState(false);
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
   const [compareImg, setCompareImg] = useState<string | null>(null);
   const [compareStep, setCompareStep] = useState<Step | null>(null);
@@ -516,7 +581,7 @@ export default function App() {
     eyes: eyesRef.current,
     skin: skinRef.current,
     mouth: mouthRef.current,
-    dodge_burn: dodgeBurnRef.current > 0 ? { amount: dodgeBurnRef.current } : null,
+    dodge_burn: sameValues(dodgeBurnRef.current, DODGE_BURN_DEFAULTS) ? null : dodgeBurnRef.current,
     clothes: creasesRef.current > 0 ? { creases: creasesRef.current } : null,
     tone: sameValues(toneRef.current, TONE_DEFAULTS) ? null : toneRef.current,
   });
@@ -663,7 +728,7 @@ export default function App() {
     const next = !outdoorRef.current;
     outdoorRef.current = next;
     setOutdoor(next);
-    if (next && view === "mask") setView("result");
+    if (next && (view === "mask" || view === "area")) setView("result");
     render();
   };
 
@@ -709,9 +774,15 @@ export default function App() {
     render();
   };
 
-  const updateDodgeBurn = (value: number) => {
-    dodgeBurnRef.current = value;
-    setDodgeBurn(value);
+  const updateDodgeBurn = (key: keyof DodgeBurnParams, value: number) => {
+    const next = { ...dodgeBurnRef.current, [key]: value };
+    dodgeBurnRef.current = next;
+    setDodgeBurn(next);
+    render();
+  };
+  const resetDodgeBurn = () => {
+    dodgeBurnRef.current = DODGE_BURN_DEFAULTS;
+    setDodgeBurn(DODGE_BURN_DEFAULTS);
     render();
   };
 
@@ -780,12 +851,16 @@ export default function App() {
         e.preventDefault();
         if (view === "mask") {
           if (maskEdits > 0 && !maskPending) undoMaskEdit();
+        } else if (view === "area") {
+          if (areaEdits > 0 && !areaPending) undoAreaEdit();
         } else if (removals > 0 && !removing) undoRemove();
-      } else if (e.key === "\\" && view !== "mask") {
+      } else if (e.key === "\\" && view !== "mask" && view !== "area") {
         e.preventDefault();
         setView((v) => (v === "before" ? "result" : "before"));
       } else if (view === "mask" && (e.key === "x" || e.key === "X")) {
         setMaskMode((m) => (m === "add" ? "subtract" : "add"));
+      } else if (view === "area" && (e.key === "x" || e.key === "X")) {
+        setAreaMode((m) => (m === "add" ? "remove" : "add"));
       } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
         e.preventDefault();
         viewerRef.current?.fit();
@@ -810,7 +885,7 @@ export default function App() {
       } else if (e.key === "[" || e.key === "]") {
         // Resize whichever brush is in use.
         const factor = e.key === "]" ? 1.2 : 1 / 1.2;
-        const setRadius = view === "mask" ? setMaskBrushRadius : setBrushRadius;
+        const setRadius = view === "mask" || view === "area" ? setMaskBrushRadius : setBrushRadius;
         setRadius((r) => clampBrush(r * factor));
       }
     };
@@ -1112,6 +1187,41 @@ export default function App() {
     if (await maskCall("mask")) setView("mask");
   };
 
+  // Refine area: a tool's area shown in blue, corrected by painting. The
+  // brush size is shared with the subject mask brush.
+  const areaCall = async (method: string, which: Area, extra: Record<string, unknown> = {}) => {
+    setAreaPending(true);
+    try {
+      if (!(await ensureOpen())) return false;
+      const r = await call<{ preview: string; edits: number }>(method, { region: which, ...extra });
+      setAreaImg(r.preview);
+      setAreaEdits(r.edits);
+      setStatus("Ready");
+      return true;
+    } catch (e) {
+      handleError(e);
+      return false;
+    } finally {
+      setAreaPending(false);
+    }
+  };
+  const showArea = async (which: Area) => {
+    if (view === "area" && area === which) {
+      closeArea();
+      return;
+    }
+    setArea(which);
+    if (await areaCall("region_view", which)) setView("area");
+  };
+  const closeArea = () => {
+    setView("result");
+    render(); // the tools redo their work with the corrected area
+  };
+  const onAreaStroke = (points: [number, number][], radius: number) =>
+    area && areaCall("region_paint", area, { mode: areaMode, points, radius });
+  const undoAreaEdit = () => area && areaCall("undo_region_edit", area);
+  const clearAreaEdits = () => area && areaCall("clear_region_edits", area);
+
   const onMaskStroke = (points: [number, number][], radius: number) =>
     maskCall("mask_paint", { mode: maskMode, points, radius });
   const undoMaskEdit = () => maskCall("undo_mask_edit");
@@ -1151,8 +1261,12 @@ export default function App() {
         return !outdoorRef.current;
       case "skin":
         return !sameValues(skinRef.current, SKIN_DEFAULTS);
+      case "skin_face":
+      case "skin_neck":
+      case "skin_body":
+        return !sameValues(skinRef.current[step.slice("skin_".length) as SkinTab], SKIN_REGION_DEFAULTS);
       case "dodge_burn":
-        return dodgeBurnRef.current > 0;
+        return !sameValues(dodgeBurnRef.current, DODGE_BURN_DEFAULTS);
       case "eyes":
         return !sameValues(eyesRef.current, EYE_DEFAULTS);
       case "mouth":
@@ -1171,7 +1285,8 @@ export default function App() {
       if (token === compareToken.current) setCompareImg(preview);
       // Photographers tend to check panels top to bottom: get the next edited
       // panel's before view ready while this one is being looked at.
-      const next = PANEL_STEPS.slice(PANEL_STEPS.indexOf(step) + 1).find(stepIsEdited);
+      const panelStep: Step = step.startsWith("skin_") ? "skin" : step;
+      const next = PANEL_STEPS.slice(PANEL_STEPS.indexOf(panelStep) + 1).find(stepIsEdited);
       if (next) beforeView(next).catch(() => undefined);
     } catch (e) {
       handleError(e);
@@ -1190,7 +1305,7 @@ export default function App() {
   // viewer shows (result, original, or a per-step before), so each request uses
   // that view's render arguments, and a tile for anything else is dropped.
   const detailArgs = (): Record<string, unknown> | null => {
-    if (view === "mask") return null;
+    if (view === "mask" || view === "area") return null;
     if (view === "before") return { removals: false };
     if (view === "compare" && compareStep) return withoutStep(lookArgs(), compareStep);
     return lookArgs();
@@ -1295,7 +1410,9 @@ export default function App() {
   const shown =
     view === "mask"
       ? mask
-      : view === "compare"
+      : view === "area"
+        ? areaImg
+        : view === "compare"
         ? (compareImg ?? result)
         : view === "before" || !result
           ? image?.preview
@@ -1336,9 +1453,10 @@ export default function App() {
         </button>
         <button
           disabled={!image || view === "mask"}
-          onPointerDown={() => setView("before")}
-          onPointerUp={() => setView((v) => (v === "before" ? "result" : v))}
-          onPointerLeave={() => setView((v) => (v === "before" ? "result" : v))}
+          {...holdHandlers(
+            () => setView("before"),
+            () => setView((v) => (v === "before" ? "result" : v)),
+          )}
           title="Hold to see the untouched original"
         >
           <Eye size={16} /> Original
@@ -1419,11 +1537,65 @@ export default function App() {
                   colour={maskMode === "add" ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 40, 40, 0.6)"}
                 />
               )}
+              {image && view === "area" && (
+                <PaintOverlay
+                  image={imgEl}
+                  active={!panning && !zoomTool}
+                  radius={maskBrushRadius}
+                  pending={areaPending}
+                  onStroke={onAreaStroke}
+                  colour={areaMode === "add" ? "rgba(60, 140, 255, 0.55)" : "rgba(255, 255, 255, 0.5)"}
+                />
+              )}
             </>
           )}
         </Viewer>
         {view === "before" && <div className="viewer__badge">Original</div>}
-        {image && view !== "mask" && (
+        {view === "mask" && (
+          <BrushBar
+            what="Subject mask"
+            mode={maskMode === "add" ? "add" : "remove"}
+            addLabel="Subject"
+            removeLabel="Backdrop"
+            onMode={(m) => setMaskMode(m === "add" ? "add" : "subtract")}
+            radius={maskBrushRadius}
+            min={BRUSH.min}
+            max={BRUSH.max}
+            step={BRUSH.step}
+            onRadius={setMaskBrushRadius}
+            edits={maskEdits}
+            pending={maskPending}
+            onUndo={undoMaskEdit}
+            onClear={clearMaskEdits}
+            onDone={showMask}
+          />
+        )}
+        {view === "area" && area && (
+          <BrushBar
+            what={`${AREA_NAMES[area]} area`}
+            mode={areaMode}
+            addLabel="Add"
+            removeLabel="Remove"
+            onMode={setAreaMode}
+            radius={maskBrushRadius}
+            min={BRUSH.min}
+            max={BRUSH.max}
+            step={BRUSH.step}
+            onRadius={setMaskBrushRadius}
+            edits={areaEdits}
+            pending={areaPending}
+            onUndo={undoAreaEdit}
+            onClear={clearAreaEdits}
+            onDone={closeArea}
+          />
+        )}
+        {view === "area" && area && (
+          <div className="viewer__badge viewer__badge--low">
+            {AREA_NAMES[area]} · blue is what the {area === "clothes" ? "Clothes" : "Skin"} tools work on ·
+            painting {areaMode === "add" ? "it in" : "it out"}
+          </div>
+        )}
+        {image && view !== "mask" && view !== "area" && (
           <div className="tabs before-after" title="Before / after (\ key)">
             <button
               className={view === "before" ? "active" : ""}
@@ -1511,11 +1683,9 @@ export default function App() {
           </div>
           <div className="panel__buttons">
             <button
-              disabled={!image || removals === 0 || removing || view === "mask"}
+              disabled={!image || removals === 0 || removing || (view === "mask" || view === "area")}
               onPointerEnter={() => prefetchWithout("removals")}
-              onPointerDown={() => holdWithout("removals")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("removals"), releaseCompare)}
               title="Hold to see the photo without your removals"
             >
               <Eye size={15} /> Hold for before
@@ -1573,8 +1743,8 @@ export default function App() {
           <Slider
             label="Exposure"
             hint="Brighten or darken the whole photo, in stops (EV)"
-            min={-2}
-            max={2}
+            min={-2.5}
+            max={2.5}
             step={0.05}
             centred
             value={toneParams.ev}
@@ -1590,11 +1760,9 @@ export default function App() {
           />
           <div className="panel__buttons">
             <button
-              disabled={!image || view === "mask" || sameValues(toneParams, TONE_DEFAULTS)}
+              disabled={!image || (view === "mask" || view === "area") || sameValues(toneParams, TONE_DEFAULTS)}
               onPointerEnter={() => prefetchWithout("tone")}
-              onPointerDown={() => holdWithout("tone")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("tone"), releaseCompare)}
               title="Hold to see the photo without the exposure and curves"
             >
               <Eye size={15} /> Hold for before
@@ -1653,9 +1821,7 @@ export default function App() {
             <button
               disabled={!image || view === "mask" || outdoor}
               onPointerEnter={() => prefetchWithout("backdrop")}
-              onPointerDown={() => holdWithout("backdrop")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("backdrop"), releaseCompare)}
               title="Hold to see the photo without backdrop smoothing"
             >
               <Eye size={15} /> Hold for before
@@ -1746,9 +1912,7 @@ export default function App() {
               <button
                 key={t.key}
                 className={skinTab === t.key ? "active" : ""}
-                disabled={!t.ready}
                 onClick={() => setSkinTab(t.key)}
-                title={t.ready ? undefined : "Coming next"}
               >
                 {t.label}
               </button>
@@ -1774,6 +1938,19 @@ export default function App() {
               onChange={(v) => updateSkin(skinTab, s.key, v)}
             />
           ))}
+          {skinTab === "neck" && (
+            <Slider
+              label="Neck lines"
+              hint="Soften the horizontal creases across the neck; some of a deep fold is always kept"
+              min={0}
+              max={1}
+              step={0.01}
+              value={skinParams.neck.neck_lines}
+              defaultValue={0}
+              disabled={!image}
+              onChange={(v) => updateSkin("neck", "neck_lines", v)}
+            />
+          )}
           {skinTab === "face" && (
             <>
               <div className="panel__head">
@@ -1803,51 +1980,67 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={
-                !image ||
-                view === "mask" ||
-                Object.values(skinParams).every((r) => Object.values(r).every((v) => v === 0))
+                !image || (view === "mask" || view === "area") || Object.values(skinParams[skinTab]).every((v) => v === 0)
               }
-              onPointerEnter={() => prefetchWithout("skin")}
-              onPointerDown={() => holdWithout("skin")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
-              title="Hold to see the photo without the skin retouching"
+              onPointerEnter={() => prefetchWithout(`skin_${skinTab}`)}
+              {...holdHandlers(() => holdWithout(`skin_${skinTab}`), releaseCompare)}
+              title={`Hold to see the photo without the ${skinTab} skin retouching`}
             >
               <Eye size={15} /> Hold for before
+            </button>
+            <button
+              disabled={!image || view === "mask"}
+              className={view === "area" && area === skinTab ? "active" : ""}
+              onClick={() => showArea(skinTab)}
+              title={`Show and correct where the ${skinTab} skin tools work`}
+            >
+              <Layers size={15} /> Refine area
             </button>
           </div>
           <p className="panel__model">
             Facial hair, eyes, brows and lips are left alone automatically. Eye wrinkles and crow's
-            feet are in the Eyes panel. Neck and Body are coming next.
+            feet are in the Eyes panel. Neck and Body find the skin by the person's own colour, so
+            clothes close to skin colour may be retouched too.
           </p>
         </Panel>
 
-        <Panel title="Dodge & Burn" {...panel("dodge_burn")}>
-          <Slider
-            label="Sculpt"
-            hint="Brighten the forehead, nose bridge, cheekbones and chin, and deepen the contours under the cheekbones and around the face"
-            min={0}
-            max={1}
-            step={0.01}
-            value={dodgeBurn}
-            defaultValue={0}
-            disabled={!image}
-            onChange={updateDodgeBurn}
-          />
+        <Panel
+          title="Dodge & Burn"
+          actions={
+            <ResetButton
+              disabled={!image || sameValues(dodgeBurn, DODGE_BURN_DEFAULTS)}
+              onClick={resetDodgeBurn}
+              what="Dodge & Burn"
+            />
+          }
+          {...panel("dodge_burn")}
+        >
+          {DODGE_BURN_SLIDERS.map((s) => (
+            <Slider
+              key={s.key}
+              label={s.label}
+              hint={s.hint}
+              min={0}
+              max={1}
+              step={0.01}
+              value={dodgeBurn[s.key]}
+              defaultValue={0}
+              disabled={!image}
+              onChange={(v) => updateDodgeBurn(s.key, v)}
+            />
+          ))}
           <div className="panel__buttons">
             <button
-              disabled={!image || view === "mask" || dodgeBurn === 0}
+              disabled={!image || (view === "mask" || view === "area") || sameValues(dodgeBurn, DODGE_BURN_DEFAULTS)}
               onPointerEnter={() => prefetchWithout("dodge_burn")}
-              onPointerDown={() => holdWithout("dodge_burn")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("dodge_burn"), releaseCompare)}
               title="Hold to see the photo without dodge & burn"
             >
               <Eye size={15} /> Hold for before
             </button>
           </div>
           <p className="panel__model">
-            Adds shape: brighter high points, deeper contours. Skin texture and colour are kept.
+            Follows the light already on the face, so nothing is painted against it. Skin texture and colour are kept.
           </p>
         </Panel>
 
@@ -1879,12 +2072,10 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={
-                !image || view === "mask" || Object.values(eyesParams).every((v) => v <= 0)
+                !image || (view === "mask" || view === "area") || Object.values(eyesParams).every((v) => v <= 0)
               }
               onPointerEnter={() => prefetchWithout("eyes")}
-              onPointerDown={() => holdWithout("eyes")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("eyes"), releaseCompare)}
               title="Hold to see the photo without the eye edits"
             >
               <Eye size={15} /> Hold for before
@@ -1928,11 +2119,9 @@ export default function App() {
           ))}
           <div className="panel__buttons">
             <button
-              disabled={!image || view === "mask" || sameValues(mouthParams, MOUTH_DEFAULTS)}
+              disabled={!image || (view === "mask" || view === "area") || sameValues(mouthParams, MOUTH_DEFAULTS)}
               onPointerEnter={() => prefetchWithout("mouth")}
-              onPointerDown={() => holdWithout("mouth")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("mouth"), releaseCompare)}
               title="Hold to see the photo without the mouth edits"
             >
               <Eye size={15} /> Hold for before
@@ -1943,7 +2132,7 @@ export default function App() {
         <Panel title="Clothes" {...panel("clothes")}>
           <Slider
             label="Fine creases"
-            hint="Smooth fine creases and wrinkles in the clothes, found automatically; the weave, seams, prints and the garment's shape are kept"
+            hint="Soften creases by evening out their shadows; use Patch to remove one completely"
             min={0}
             max={1}
             step={0.01}
@@ -1954,19 +2143,25 @@ export default function App() {
           />
           <div className="panel__buttons">
             <button
-              disabled={!image || view === "mask" || creases === 0}
+              disabled={!image || (view === "mask" || view === "area") || creases === 0}
               onPointerEnter={() => prefetchWithout("clothes")}
-              onPointerDown={() => holdWithout("clothes")}
-              onPointerUp={releaseCompare}
-              onPointerLeave={releaseCompare}
+              {...holdHandlers(() => holdWithout("clothes"), releaseCompare)}
               title="Hold to see the photo without crease smoothing"
             >
               <Eye size={15} /> Hold for before
             </button>
+            <button
+              disabled={!image || view === "mask"}
+              className={view === "area" && area === "clothes" ? "active" : ""}
+              onClick={() => showArea("clothes")}
+              title="Show and correct where the Clothes tool works"
+            >
+              <Layers size={15} /> Refine area
+            </button>
           </div>
           <p className="panel__model">
-            Clothes are found automatically: the subject, minus skin and head. Smooths fine creases on plain fabric;
-            thick folds are part of the garment's shape and are kept (use Patch for one that needs to go).
+            Softens creases by evening out their shadows, so they look less obvious. For creases that need to
+            go completely, use the Patch tool.
           </p>
         </Panel>
 

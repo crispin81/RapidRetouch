@@ -1,4 +1,4 @@
-"""Command line: `retouch-engine serve` for the app, or run a tool on one file."""
+"""Command line: `rapidretouch-engine serve` for the app, or run a tool on one file."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .tools import backdrop_smooth
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="retouch-engine")
+    parser = argparse.ArgumentParser(prog="rapidretouch-engine")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve", help="speak the JSON-lines protocol on stdin/stdout")
 

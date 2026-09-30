@@ -1,29 +1,49 @@
 import numpy as np
 
-from retouch_engine.tools import dodge_burn, patch
+from rapidretouch_engine.tools import dodge_burn, patch
 
 
 def _grey(h=200, w=300, v=0.4):
     return np.full((h, w, 3), v, np.float32)
 
 
-def test_dodge_burn_zones_brighten_high_points_and_deepen_the_edge():
-    # A synthetic face: landmarks laid out on a unit square scaled to 400 px.
+def test_highlights_and_shadows_strengthen_the_existing_light_and_shade():
+    # A face's contours: a lit ridge (a cheekbone) and a shaded hollow (under
+    # it), each about a tenth of a face wide, plus pore-scale texture, which
+    # must not count as light.
     rng = np.random.default_rng(0)
-    lm = rng.uniform(150, 250, (478, 2)).astype(np.float32)
-    from retouch_engine.tools.skin import FACE_OVAL
+    h, w, fw = 300, 300, 300.0
+    x = np.arange(w, dtype=np.float32)
+    bumps = 0.5 * np.exp(-((x - 90) ** 2) / (2 * 15.0**2)) - 0.5 * np.exp(-((x - 210) ** 2) / (2 * 15.0**2))
+    Y = 0.25 * np.exp2(bumps)[None, :].repeat(h, 0)
+    Y *= 1 + 0.05 * rng.standard_normal((h, w)).astype(np.float32)
+    shape = dodge_burn.light_shape(Y, np.ones((h, w), np.float32), fw)
+    both = dodge_burn.tone_curve(shape, dodge_burn.Params(highlights=1, shadows=1))
+    lit, shade = both[150, 90], both[150, 210]
+    assert lit > 0.15 and shade < -0.15  # clearly stronger than the old Sculpt (~0.1)
+    assert np.abs(both[:, 140:160]).max() < abs(lit)  # the plain skin between moves least
+    assert np.abs(np.diff(both[150])).max() < 0.03  # pores don't become dodge & burn
+    # Each slider only touches its own side.
+    only_h = dodge_burn.tone_curve(shape, dodge_burn.Params(highlights=1))
+    only_s = dodge_burn.tone_curve(shape, dodge_burn.Params(shadows=1))
+    assert only_h.min() >= 0 and only_s.max() <= 0
 
-    t = np.linspace(0, 2 * np.pi, len(FACE_OVAL), endpoint=False)
-    lm[FACE_OVAL] = np.stack([200 + 150 * np.sin(t), 200 - 180 * np.cos(t)], 1)
-    lm[151], lm[9] = (200, 90), (200, 140)
-    dodge, burn = dodge_burn.zones((400, 400), lm, fw=300)
-    assert dodge[110, 200] > 0.5  # forehead centre
-    assert burn[200, 55] > 0.5 and dodge[200, 55] < 0.1  # the face's edge
+
+def test_tone_curve_rolls_off_and_never_clips():
+    shape = np.linspace(-3, 3, 601, dtype=np.float32)
+    added = dodge_burn.tone_curve(shape, dodge_burn.Params(highlights=1, shadows=1))
+    assert np.all(np.diff(added) >= 0)  # never reverses the light
+    assert added.max() <= dodge_burn.HIGHLIGHT_MAX and added.min() >= -dodge_burn.SHADOW_MAX
+
+
+def test_old_sculpt_setting_loads_as_highlights_and_shadows():
+    p = dodge_burn.Params.from_dict({"amount": 0.4})
+    assert (p.contour, p.highlights, p.shadows) == (0, 0.4, 0.4)
 
 
 def test_dodge_burn_off_changes_nothing():
     img = _grey()
-    assert np.array_equal(dodge_burn.apply(img, [], 0.0), img)
+    assert np.array_equal(dodge_burn.apply(img, [], dodge_burn.Params()), img)
 
 
 def test_patch_copies_texture_but_keeps_the_target_tone():

@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Retouch",
-  "mainBinaryName": "Retouch",
+  "productName": "RapidRetouch",
+  "mainBinaryName": "RapidRetouch",
   "version": "0.1.0",
-  "identifier": "com.chriscork.retouch",
+  "identifier": "com.chriscork.rapidretouch",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

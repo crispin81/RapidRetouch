@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from retouch_engine.tools import backdrop_smooth as bs
+from rapidretouch_engine.tools import backdrop_smooth as bs
 
 H, W = 1500, 1000
 
@@ -122,7 +122,7 @@ def test_exposure_darkens_only_backdrop_share_of_each_pixel():
     """Compose a subject with a soft edge over a flat white backdrop in linear
     light; after -1 EV every pixel should be aF + (1-a)(B/2) — backdrop halved,
     subject untouched, no light halo at the soft edge."""
-    from retouch_engine.tools.colour import linear_to_srgb, srgb_to_linear
+    from rapidretouch_engine.tools.colour import linear_to_srgb, srgb_to_linear
 
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
     d = np.sqrt(((xx - 500) / 260) ** 2 + ((yy - 900) / 420) ** 2)

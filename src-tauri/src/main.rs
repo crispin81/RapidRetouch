@@ -26,5 +26,5 @@ fn main() {
     #[cfg(target_os = "linux")]
     apply_linux_webkit_workarounds();
 
-    retouch_lib::run()
+    rapidretouch_lib::run()
 }

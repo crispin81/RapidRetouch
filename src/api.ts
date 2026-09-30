@@ -61,6 +61,7 @@ export interface SkinRegion {
   frown_lines: number;
   smile_lines: number;
   chin_lines: number;
+  neck_lines: number; // Neck tab only
 }
 
 export interface MouthParams {

@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from retouch_engine.tools import eyes
+from rapidretouch_engine.tools import eyes
 
 
 def test_line_detector_prefers_wrinkles_over_pores():
