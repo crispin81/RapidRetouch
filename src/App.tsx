@@ -36,6 +36,7 @@ import {
   jpegSrc,
   onEngineEvent,
 } from "./api";
+import About from "./About";
 import BrushBar from "./BrushBar";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
@@ -519,6 +520,7 @@ export default function App() {
   const [maskMode, setMaskMode] = useState<"add" | "subtract">("add");
   const [maskEdits, setMaskEdits] = useState(0);
   const [maskPending, setMaskPending] = useState(false);
+  const [aboutModels, setAboutModels] = useState<ModelInfo[] | null>(null);
   const [area, setArea] = useState<Area | null>(null);
   const [areaImg, setAreaImg] = useState<string | null>(null);
   const [areaEdits, setAreaEdits] = useState(0);
@@ -1081,6 +1083,16 @@ export default function App() {
     await call("forget", { path }).catch(() => undefined);
   };
 
+  // About: the app, its licence and the AI models it uses (from the engine's
+  // own list, so it's always accurate).
+  const showAbout = async () => {
+    try {
+      setAboutModels(await call<ModelInfo[]>("models"));
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
   const copySettings = () => {
     setCopied(currentSettings());
     setStatus("Settings copied");
@@ -1482,6 +1494,9 @@ export default function App() {
             title="100%: one image pixel per screen pixel (Ctrl+1)"
           >
             100%
+          </button>
+          <button className="toolbar__about" onClick={showAbout} title="About RapidRetouch">
+            About
           </button>
           <span className="toolbar__zoom">{image ? zoomLabel : ""}</span>
         </div>
@@ -2230,6 +2245,7 @@ export default function App() {
         </a>
       </footer>
 
+      {aboutModels && <About models={aboutModels} onClose={() => setAboutModels(null)} />}
       {licencePrompt && (
         <div className="modal">
           <div className="modal__box">

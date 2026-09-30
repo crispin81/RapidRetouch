@@ -28,6 +28,7 @@ export interface ModelInfo {
   default: boolean;
   accepted: boolean;
   badges: string[];
+  note?: string; // one-line description of the model
 }
 
 export interface BackdropParams {

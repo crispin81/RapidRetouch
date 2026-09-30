@@ -32,6 +32,7 @@ from .tools import mouth as mouth_tool
 from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
+EXPORT_BIT_DEPTH = 16  # every export is a 16-bit TIFF
 STAGE_CACHE_SIZE = 8  # preview stages kept: the current look's, plus a before view's
 METHODS = {
     "ping",
@@ -153,6 +154,7 @@ class Engine:
                 "default": m.bundled_default,
                 "accepted": self.registry.is_accepted(m),
                 "badges": m.badges(),
+                "note": m.quality_note,
             }
             for m in self.registry.manifests.values()
         ]
@@ -734,14 +736,21 @@ class Engine:
         return {"image": _jpeg_b64(crop), "region": [x0, y0, x1, y1]}
 
     def export(self, path: str, **look) -> dict:
+        """Export the retouched photo at full resolution as a 16-bit TIFF
+        (lossless, colour profile embedded), whatever the original was: the
+        highest quality for further editing. A name without a TIFF extension
+        gets one."""
         self._require_image()
         out = Path(path)
+        if out.suffix.lower() not in (".tif", ".tiff"):
+            out = out.with_name(out.name + ".tif")
         if out.resolve() == self.path.resolve():
             raise ValueError("refusing to overwrite the original image")
         look = {**self._look(look), "removals": True}
         rgb, steps = self._full_pipeline(look)
         self.status(f"Writing {out.name}")
-        imageio.save(out, rgb, self.image.bit_depth, self.image.icc)
+        # Untagged originals are treated as sRGB throughout, so say so in the file.
+        imageio.save(out, rgb, EXPORT_BIT_DEPTH, self.image.icc or imageio._srgb_icc())
         settings = {"source": str(self.path), "steps": steps}
         sidecar = out.with_name(out.name + ".retouch.json")
         sidecar.write_text(json.dumps(settings, indent=2))
