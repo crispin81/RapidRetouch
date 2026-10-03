@@ -12,6 +12,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from ..parallel import by_rows
 from .colour import linear_to_srgb, srgb_to_linear
 
 LUT_SIZE = 4096
@@ -123,9 +124,13 @@ def is_noop(params: dict | None) -> bool:
 def apply(rgb: np.ndarray, params: dict | None) -> np.ndarray:
     """``params``: {"temperature": -1..1, "tint": -1..1, "ev": stops,
     "vibrance": -1..1, "curve": [[x, y], ...] (lightness 0..1)}, applied in
-    that order."""
+    that order. Every step is per pixel, so it runs on all cores."""
     if is_noop(params):
         return rgb
+    return by_rows(lambda part: _apply(part, params), rgb)
+
+
+def _apply(rgb: np.ndarray, params: dict) -> np.ndarray:
     out = np.clip(rgb, 0, 1).astype(np.float32)
     temperature, tint = float(params.get("temperature", 0)), float(params.get("tint", 0))
     if temperature or tint:

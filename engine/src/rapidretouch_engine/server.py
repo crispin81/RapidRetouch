@@ -34,6 +34,15 @@ from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
 EXPORT_BIT_DEPTH = 16  # every export is a 16-bit TIFF
+# Zooming in (see render_region): how much more than the view is rendered on
+# each side (as a share of its size), how many such areas are kept for panning
+# back, and the face tools' crop at full resolution and how many of its
+# stages are kept (each ~200 MB at 100 MP: the four face tools' results for
+# two looks, so going back and forth between sliders finds them).
+ZOOM_SPARE = 0.25
+ZOOM_TILES = 4
+FACE_WINDOW_MARGIN = 0.5  # face widths around the face outline: every face tool works within it
+FACE_WINDOW_CACHE_SIZE = 8
 STAGE_CACHE_SIZE = 8  # preview stages kept: the current look's, plus a before view's
 METHODS = {
     "ping",
@@ -131,6 +140,8 @@ class Engine:
         self._stage_cache: dict[str, np.ndarray] = {}
         self._parts: dict[str, np.ndarray] | None = None  # person-parts probabilities (see _part)
         self._acne: tuple | None = None  # (key, spot maps) found at full detail (see _acne_masks)
+        self._zoom_tiles: list[tuple] = []  # (key, area, untoned pixels), see render_region
+        self._face_window_cache: dict[str, np.ndarray] = {}  # face tools at full resolution, see _zoom_area
         self._iris_scale: tuple | None = None  # (colours,) for the open photo, see iris_scale
         self._exporting: float | None = None  # progress of the export under way, 0..1
 
@@ -201,6 +212,7 @@ class Engine:
         self._parts = None
         self._acne = None
         self._iris_scale = None
+        self._zoom_tiles, self._face_window_cache = [], {}
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
         if saved:
@@ -559,14 +571,28 @@ class Engine:
     def _edited_preview(self) -> np.ndarray:
         return self.filled_previews[-1] if self.filled_previews else self.preview
 
-    def _face_stages(self, look: dict, people) -> list[tuple[str, dict, object]]:
+    def _face_stages(self, look: dict, people, frame=None) -> list[tuple[str, dict, object]]:
         """Skin, neck & body, dodge & burn, eyes and mouth, in that order: the
         ones this look uses, each (name, settings, run). ``run(rgb, steps)``
         works at whatever resolution ``rgb`` is and, given ``steps``, records
         what it did there (for the export). ``people()`` gives the neck and
         body skin (see ``_body_people``); it's only called when a Neck or Body
-        slider is set."""
+        slider is set.
+
+        ``frame``: (box, full_shape) to run the face tools on just ``box`` of
+        the full-resolution photo (zooming in; see ``_face_window``) instead of
+        the whole of it. Faces, the hair map and area edits are moved into the
+        box's coordinates; Neck & Body aren't available."""
         landmarks = lambda: [self.registry.default_for("face_landmarks").provenance()]  # noqa: E731
+        if frame is None:
+            faces = self._ensure_faces
+            hair = lambda: self._part("hair")  # noqa: E731
+            framed_edits = lambda edits: edits  # noqa: E731
+        else:
+            box, full_shape = frame
+            faces = lambda: _frame_faces(self._ensure_faces(), box, full_shape)  # noqa: E731
+            hair = lambda: _frame_map(self._part("hair"), box, full_shape)  # noqa: E731
+            framed_edits = lambda edits: _frame_edits(edits, box, full_shape)  # noqa: E731
         stages = []
         skin = look["skin"] or {}
         face_p = skin_tool.RegionParams.from_dict(skin.get("face"))
@@ -577,9 +603,9 @@ class Engine:
                 # Smaller than the photo (the preview): Acne's spots are found
                 # at full detail, so the preview and the zoomed-in view agree.
                 acne = None
-                if face_p.acne > 0 and rgb.shape[1] < self.image.rgb.shape[1]:
+                if face_p.acne > 0 and frame is None and rgb.shape[1] < self.image.rgb.shape[1]:
                     acne = self._acne_masks(face_p.acne, face_edits)
-                rgb = skin_tool.apply(rgb, self._ensure_faces(), skin.get("face"), face_edits, self._part("hair"), acne)
+                rgb = skin_tool.apply(rgb, faces(), skin.get("face"), framed_edits(face_edits), hair(), acne)
                 if steps is not None:
                     steps.append({"tool": "skin", "face": asdict(face_p), "area_edits": face_edits,
                                   "faces": len(self.faces), "models": landmarks()})
@@ -587,7 +613,7 @@ class Engine:
             stages.append(("skin", {"params": asdict(face_p), "edits": face_edits}, run))
         neck_p = skin_tool.RegionParams.from_dict(skin.get("neck"))
         body_p = skin_tool.RegionParams.from_dict(skin.get("body"))
-        if not (neck_p.is_noop() and body_p.is_noop()):
+        if frame is None and not (neck_p.is_noop() and body_p.is_noop()):
             body_edits = {r: list(self.region_edits[r]) for r in ("neck", "body")}
 
             def run(rgb, steps):
@@ -606,7 +632,7 @@ class Engine:
         db_p = dodge_burn.Params.from_dict(look["dodge_burn"])
         if not db_p.is_noop():
             def run(rgb, steps):
-                rgb = dodge_burn.apply(rgb, self._ensure_faces(), db_p, self._part("hair"))
+                rgb = dodge_burn.apply(rgb, faces(), db_p, hair())
                 if steps is not None:
                     steps.append({"tool": "dodge_burn", "params": asdict(db_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
@@ -614,7 +640,7 @@ class Engine:
         eyes_p = eye_tool.Params.from_dict(look["eyes"] or {})
         if look["eyes"] is not None and not eyes_p.is_noop():
             def run(rgb, steps):
-                rgb = eye_tool.apply(rgb, self._ensure_faces(), eyes_p)
+                rgb = eye_tool.apply(rgb, faces(), eyes_p)
                 if steps is not None:
                     steps.append({"tool": "eyes", "params": asdict(eyes_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
@@ -622,7 +648,7 @@ class Engine:
         mouth_p = mouth_tool.Params.from_dict(look["mouth"])
         if look["mouth"] is not None and not mouth_p.is_noop():
             def run(rgb, steps):
-                rgb = mouth_tool.apply(rgb, self._ensure_faces(), mouth_p)
+                rgb = mouth_tool.apply(rgb, faces(), mouth_p)
                 if steps is not None:
                     steps.append({"tool": "mouth", "params": asdict(mouth_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
@@ -636,29 +662,31 @@ class Engine:
             rgb = run(rgb, steps)
         return rgb
 
-    def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]]) -> np.ndarray:
+    def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE) -> np.ndarray:
         """Run ``stages`` on ``rgb`` (a callable, only called if needed),
         reusing the output of every stage whose settings, and whose earlier
         stages' settings, are unchanged. Moving one tool's slider then reruns
         only that tool and the ones after it."""
+        if cache is None:
+            cache = self._stage_cache
         keys, key = [], base_key
         for name, settings, _run in stages:
             key = json.dumps([key, name, settings], sort_keys=True)
             keys.append(key)
         start, img = 0, None
         for i in range(len(stages) - 1, -1, -1):
-            hit = self._stage_cache.pop(keys[i], None)
+            hit = cache.pop(keys[i], None)
             if hit is not None:
-                self._stage_cache[keys[i]] = hit  # most recently used
+                cache[keys[i]] = hit  # most recently used
                 start, img = i + 1, hit
                 break
         if img is None:
             img = rgb()
         for i in range(start, len(stages)):
             img = stages[i][2](img, None)
-            self._stage_cache[keys[i]] = img
-            while len(self._stage_cache) > STAGE_CACHE_SIZE:
-                self._stage_cache.pop(next(iter(self._stage_cache)))
+            cache[keys[i]] = img
+            while len(cache) > size:
+                cache.pop(next(iter(cache)))
         return img
 
     def _render(self, look: dict) -> np.ndarray:
@@ -744,8 +772,9 @@ class Engine:
 
         ``region`` is (x0, y0, x1, y1) in full-resolution pixels; ``scale`` is the
         output size relative to full resolution (<= 1: never send more pixels than
-        the screen shows). The full-resolution result is cached, so panning around
-        only crops and encodes."""
+        the screen shows). Only the area in view (and a little around it) is
+        rendered, and the last few areas are kept, so panning back only crops
+        and encodes (see ``_zoom_area``)."""
         self._require_image()
         look = self._look(look)
         h, w = self.image.rgb.shape[:2]
@@ -754,19 +783,24 @@ class Engine:
         if x1 <= x0 or y1 <= y0:
             raise ValueError("empty region")
         # Cached before the tone: the tone is per-pixel, so it's applied to just
-        # the crop, and moving the exposure or curve never re-renders the photo.
+        # the crop, and moving the exposure or curve never re-renders. A little
+        # more than the view is rendered, so small pans are only a crop.
         untoned = {**look, "tone": None}
         key = json.dumps(
             [untoned, self.strokes, self.mask_edits, self.region_edits, self.mask_model], sort_keys=True
         )
-        cached = self._full.get("result")
-        if cached and cached[0] == key:
-            full = cached[1]
-        else:
+        hit = next(
+            (t for t in self._zoom_tiles if t[0] == key and t[1][0] <= x0 and t[1][1] <= y0 and t[1][2] >= x1 and t[1][3] >= y1),
+            None,
+        )
+        if hit is None:
             self.status("Rendering full-resolution detail")
-            full, _ = self._full_pipeline(untoned)
-            self._full["result"] = (key, full)
-        crop = full[y0:y1, x0:x1]
+            px, py = round((x1 - x0) * ZOOM_SPARE), round((y1 - y0) * ZOOM_SPARE)
+            area = (max(0, x0 - px), max(0, y0 - py), min(w, x1 + px), min(h, y1 + py))
+            hit = (key, area, self._zoom_area(untoned, area))
+            self._zoom_tiles = [t for t in self._zoom_tiles if t[0] == key][-(ZOOM_TILES - 1):] + [hit]
+        _key, (ax0, ay0, _ax1, _ay1), pixels = hit
+        crop = pixels[y0 - ay0 : y1 - ay0, x0 - ax0 : x1 - ax0]
         scale = min(1.0, max(0.01, scale))
         if scale < 1:
             size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
@@ -810,55 +844,130 @@ class Engine:
         self._full[stage] = (key, value)
         return value
 
-    def _full_pipeline(self, look: dict) -> tuple[np.ndarray, list[dict]]:
-        """The whole pipeline at full resolution, in the preview's order.
-        Returns the image and the steps to record in the export's settings."""
-        rgb = self.image.rgb
-        steps: list[dict] = []
-        removals, backdrop, model = look["removals"], look["backdrop"], look["model"]
+    def _edited_full(self, look: dict) -> tuple[np.ndarray, dict | None, str | None]:
+        """The full-resolution photo with the Remove/Patch strokes applied (if
+        the look includes them), the step to record, and a key for it."""
+        if not (look["removals"] and self.strokes):
+            return self.image.rgb, None, None
+        # Strokes only ever get appended (or undone), so if the cached fills
+        # are a prefix of the current strokes, only the new ones need filling.
+        done, out = [], self.image.rgb
+        hit = self._full.get("edited")
+        if hit and hit[0] == self.strokes[: len(hit[0])]:
+            done, out = hit[0], hit[1]
+        for i, stroke in enumerate(self.strokes[len(done):], len(done) + 1):
+            self.status(f"Removing at full resolution ({i} of {len(self.strokes)})")
+            out = self._apply_stroke(out, stroke)
+        self._full["edited"] = (list(self.strokes), out)
+        kinds = {s.get("kind", "fill") for s in self.strokes}
+        models = []
+        if "fill" in kinds:
+            models.append(self.registry.default_for("inpaint").provenance())
+        if "reflection" in kinds:  # eye openings come from the face landmarks
+            models.append(self.registry.default_for("face_landmarks").provenance())
+        return out, {"tool": "remove", "strokes": self.strokes, "models": models}, json.dumps(self.strokes)
 
-        if removals and self.strokes:
-            # Strokes only ever get appended (or undone), so if the cached fills
-            # are a prefix of the current strokes, only the new ones need filling.
-            done, out = [], self.image.rgb
-            hit = self._full.get("edited")
-            if hit and hit[0] == self.strokes[: len(hit[0])]:
-                done, out = hit[0], hit[1]
-            for i, stroke in enumerate(self.strokes[len(done):], len(done) + 1):
-                self.status(f"Removing at full resolution ({i} of {len(self.strokes)})")
-                out = self._apply_stroke(out, stroke)
-            self._full["edited"] = (list(self.strokes), out)
-            rgb = out
-            kinds = {s.get("kind", "fill") for s in self.strokes}
-            models = []
-            if "fill" in kinds:
-                models.append(self.registry.default_for("inpaint").provenance())
-            if "reflection" in kinds:  # eye openings come from the face landmarks
-                models.append(self.registry.default_for("face_landmarks").provenance())
-            steps.append({"tool": "remove", "strokes": self.strokes, "models": models})
-        edited = rgb
-        removal_key = json.dumps(self.strokes) if removals else None
-        mask_key = json.dumps([self.mask_model, self.mask_edits])
-
-        def edited_alpha():
+    def _alpha_full(self) -> np.ndarray:
+        """The subject mask at full resolution, with the hand edits (cached)."""
+        def compute():
             if not self.mask_edits:
                 return self.alpha
             self.status("Applying mask edits at full resolution")
             return mask_edit.apply(self.alpha, self.mask_edits)
+        return self._cached("alpha", json.dumps([self.mask_model, self.mask_edits]), compute)
+
+    def _lighting(self, p, edited, alpha, removal_key, mask_key) -> "backdrop_smooth.Lighting":
+        """The backdrop's whole-photo lighting and grain at full resolution
+        (see backdrop_smooth.lighting), shared by zooming in and export."""
+        def compute():
+            self.status("Measuring the backdrop at full resolution")
+            return backdrop_smooth.lighting(edited, alpha, p)
+        return self._cached("lighting", (backdrop_smooth.prepare_key(p), removal_key, mask_key), compute)
+
+    def _face_window(self) -> tuple[int, int, int, int] | None:
+        """The part of the full-resolution photo every face tool works within
+        (all faces), or None if there's no face to retouch."""
+        h, w = self.image.rgb.shape[:2]
+        lo, hi = [], []
+        for face in self._ensure_faces():
+            lm = face[:, :2] * np.array([w, h], np.float32)
+            fw = skin_tool.face_width(lm)
+            if fw < 40:
+                continue
+            pts = lm[skin_tool.FACE_OVAL]
+            lo.append(pts.min(0) - FACE_WINDOW_MARGIN * fw)
+            hi.append(pts.max(0) + FACE_WINDOW_MARGIN * fw)
+        if not lo:
+            return None
+        x0, y0 = np.maximum(np.floor(np.min(lo, 0)), 0).astype(int)
+        x1, y1 = np.minimum(np.ceil(np.max(hi, 0)), [w, h]).astype(int)
+        return int(x0), int(y0), int(x1), int(y1)
+
+    def _zoom_area(self, look: dict, box: tuple[int, int, int, int]) -> np.ndarray:
+        """``box`` of the full-resolution result, before the tone, working on
+        as little of the photo as possible: the backdrop for just that area,
+        and the face tools only if a face is in it, on a crop around the faces
+        (each tool's result kept, so moving one slider reruns only that tool
+        and the ones after it). Neck & Body and Creases work on the whole
+        person, so with those the whole photo is rendered (and kept)."""
+        x0, y0, x1, y1 = box
+        if self._crease_amount(look) > 0 or any(
+            not skin_tool.RegionParams.from_dict((look["skin"] or {}).get(r)).is_noop() for r in ("neck", "body")
+        ):
+            key = json.dumps([look, self.strokes, self.mask_edits, self.region_edits, self.mask_model], sort_keys=True)
+            full = self._cached("result", key, lambda: self._full_pipeline(look)[0])
+            return full[y0:y1, x0:x1]
+        edited, _step, removal_key = self._edited_full(look)
+        mask_key = json.dumps([self.mask_model, self.mask_edits])
+        backdrop = look["backdrop"]
+
+        def smoothed(area):
+            ax0, ay0, ax1, ay1 = area
+            if backdrop is None:
+                return edited[ay0:ay1, ax0:ax1]
+            self._ensure_mask(look["model"])
+            p = backdrop_smooth.Params.from_dict(backdrop)
+            alpha = self._alpha_full()
+            light = self._lighting(p, edited, alpha, removal_key, mask_key)
+            return backdrop_smooth.smooth_area(edited, alpha, p, light, area)
+
+        out = np.array(smoothed(box), np.float32)
+        face = self._face_window() if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")) else None
+        if face is not None:
+            ix0, iy0 = max(x0, face[0]), max(y0, face[1])
+            ix1, iy1 = min(x1, face[2]), min(y1, face[3])
+            stages = self._face_stages(look, None, frame=(face, edited.shape[:2]))
+            if stages and ix1 > ix0 and iy1 > iy0:
+                self.status("Retouching the face at full resolution")
+                base_key = json.dumps([backdrop, removal_key, mask_key, face], sort_keys=True)
+                faced = self._staged(lambda: np.array(smoothed(face), np.float32), base_key, stages,
+                                     self._face_window_cache, FACE_WINDOW_CACHE_SIZE)
+                out[iy0 - y0 : iy1 - y0, ix0 - x0 : ix1 - x0] = faced[iy0 - face[1] : iy1 - face[1], ix0 - face[0] : ix1 - face[0]]
+        return out
+
+    def _full_pipeline(self, look: dict) -> tuple[np.ndarray, list[dict]]:
+        """The whole pipeline at full resolution, in the preview's order.
+        Returns the image and the steps to record in the export's settings."""
+        steps: list[dict] = []
+        backdrop, model = look["backdrop"], look["model"]
+        rgb, removal_step, removal_key = self._edited_full(look)
+        if removal_step:
+            steps.append(removal_step)
+        edited = rgb
+        mask_key = json.dumps([self.mask_model, self.mask_edits])
+
+        def edited_alpha():
+            return self._alpha_full()
 
         if backdrop is not None:
             self._ensure_mask(model)
             p = backdrop_smooth.Params.from_dict(backdrop)
             alpha = self._cached("alpha", mask_key, edited_alpha)
 
-            def prepare():
-                self.status("Smoothing backdrop at full resolution")
-                return backdrop_smooth.prepare(rgb, alpha, p)
-
-            prep = self._cached(
-                "backdrop", (backdrop_smooth.prepare_key(p), removal_key, mask_key), prepare
-            )
-            rgb = backdrop_smooth.compose(prep, p)
+            light = self._lighting(p, edited, alpha, removal_key, mask_key)
+            self.status("Smoothing backdrop at full resolution")
+            # Not kept: at 100 MP it's several GB, and zooming in has its own path.
+            rgb = backdrop_smooth.compose(backdrop_smooth.prepare(rgb, alpha, p, light), p)
             steps.append(
                 {
                     "tool": "backdrop_smooth",
@@ -950,6 +1059,42 @@ EXPORT_STEP = 0.3
 EXPORT_WRITING = 0.9
 
 BACKGROUND = {"thumbnail"}  # methods that touch no engine state
+
+
+def _frame_faces(faces: list[np.ndarray], box, full_shape) -> list[np.ndarray]:
+    """Face landmarks (fractions of the whole photo) as fractions of ``box``."""
+    h, w = full_shape
+    x0, y0, x1, y1 = box
+    out = []
+    for f in faces:
+        g = np.array(f, np.float64)
+        g[:, 0] = (g[:, 0] * w - x0) / (x1 - x0)
+        g[:, 1] = (g[:, 1] * h - y0) / (y1 - y0)
+        out.append(g.astype(np.float32))
+    return out
+
+
+def _frame_map(m: np.ndarray, box, full_shape) -> np.ndarray:
+    """A map covering the whole photo (any size), cropped to ``box`` at the same detail."""
+    h, w = full_shape
+    x0, y0, x1, y1 = box
+    size = (max(1, round((y1 - y0) * m.shape[0] / h)), max(1, round((x1 - x0) * m.shape[1] / w)))
+    return skin_tool._map_into(m, (0, 0, 1, 1), box, full_shape, size)
+
+
+def _frame_edits(edits: list[dict], box, full_shape) -> list[dict]:
+    """Area edits (fractions of the whole photo) as fractions of ``box``."""
+    h, w = full_shape
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+    return [
+        {
+            **e,
+            "points": [((x * w - x0) / bw, (y * h - y0) / bh) for x, y in e["points"]],
+            "radius": e["radius"] * max(h, w) / max(bw, bh),
+        }
+        for e in edits
+    ]
 
 
 def _handle(engine: Engine, req: dict, emit) -> None:

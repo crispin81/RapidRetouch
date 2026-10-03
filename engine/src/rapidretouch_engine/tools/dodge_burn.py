@@ -61,6 +61,7 @@ WORK_FW = 400  # px: the light map is smooth, so it's worked out at this size
 # which look much the same, are still dodged.
 HAIR_SOFT = 0.01
 STRANDS_NEAR_HAIR = 0.08
+STRANDS_PAD = 0.01  # face widths of context around where strands are traced
 
 # Contour zones (MediaPipe face mesh landmarks), widths in face widths.
 DODGE_LINES = [([168, 6, 197, 195, 5], 0.035)]  # nose bridge
@@ -214,9 +215,14 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params, head_hair: np.nda
         if on_hair is not None:
             near = cv2.resize(blur(on_hair, STRANDS_NEAR_HAIR * sfw), (crop.shape[1], crop.shape[0]))
             near = np.clip(near * 4, 0, 1)
-            if near.max() > 0:
-                L = cv2.cvtColor(crop.astype(np.float32), cv2.COLOR_RGB2Lab)[..., 0]
-                stops = stops * (1 - _strands(L, fw) * near)
+            ys, xs = np.nonzero((near > 0.01) & (stops != 0))
+            if len(ys):
+                # Traced only where it matters: near the hair, where there's a change.
+                pad = 2 * round(STRANDS_PAD * fw) + 1
+                ya, yb = max(0, ys.min() - pad), min(near.shape[0], ys.max() + 1 + pad)
+                xa, xb = max(0, xs.min() - pad), min(near.shape[1], xs.max() + 1 + pad)
+                L = cv2.cvtColor(crop[ya:yb, xa:xb].astype(np.float32), cv2.COLOR_RGB2Lab)[..., 0]
+                stops[ya:yb, xa:xb] *= 1 - _strands(L, fw) * near[ya:yb, xa:xb]
         lin = srgb_to_linear(crop)
         # Dodging near-white skin only blows it out. Judged over an area, not
         # per pixel: per pixel, bright and dark specks were dodged differently,

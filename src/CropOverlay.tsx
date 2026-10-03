@@ -141,6 +141,10 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
   const redraw = () => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
+    // A new preview (a slider moved) is still loading: keep the last frame
+    // rather than clearing to an empty one, which flickered. Its load event
+    // redraws.
+    if (editing && (!image.complete || image.naturalWidth === 0)) return;
     const c = canvas.getBoundingClientRect();
     const img = image.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;

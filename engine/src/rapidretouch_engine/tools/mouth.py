@@ -14,13 +14,16 @@ import cv2
 import numpy as np
 
 from .eyes import _inner_feather, _poly_mask
-from .filters import masked_blur
+from .filters import grow_mask, masked_blur
 from .skin import LIPS
 
 LIPS_INNER = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191]
 MOUTH_CORNERS = (61, 291)
 
-LIP_FEATHER = 0.035  # mouth widths: lips fade in from their outline
+LIP_FEATHER = 0.018  # mouth widths: lips fade in from their outline
+# The landmarks' outer lip outline sits a little inside the visible lip edge:
+# grown by this (mouth widths) so the edges get the full change too.
+LIP_GROW = 0.012
 SATURATION_RANGE = 0.5  # full slider right scales lip chroma by 1 + this
 MUTE_RANGE = 0.7  # full slider left moves lip colour this far toward the skin's
 HUE_RANGE = 25.0  # degrees the lip colour turns at either end of Lip hue
@@ -78,7 +81,8 @@ def _mouth(lab: np.ndarray, lm: np.ndarray, p: Params) -> None:
     mw = float(np.linalg.norm(lm[MOUTH_CORNERS[0]] - lm[MOUTH_CORNERS[1]]))
     outer = _poly_mask(shape, lm[LIPS])
     inner = _poly_mask(shape, lm[LIPS_INNER])
-    lips = _inner_feather(np.clip(outer - inner, 0, 1), LIP_FEATHER * mw)
+    reach = grow_mask(outer, 2 * max(1, round(LIP_GROW * mw)) + 1)
+    lips = _inner_feather(np.clip(reach - inner, 0, 1), LIP_FEATHER * mw)
 
     if p.lip_smooth > 0:
         L = lab[..., 0]
