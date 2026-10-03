@@ -97,8 +97,12 @@ def save(path: str | Path, rgb: np.ndarray, bit_depth: int, icc: bytes | None) -
             path, data, photometric="rgb", compression="zlib", extratags=extratags
         )
     else:
+        # JPEG at its highest quality: quality 100 and full-resolution colour
+        # (4:4:4, no chroma subsampling), so fine colour edges such as hair
+        # against a backdrop stay clean.
         im = Image.fromarray(np.round(rgb * 255).astype(np.uint8))
-        im.save(path, quality=95, icc_profile=icc) if icc else im.save(path, quality=95)
+        extra = {"icc_profile": icc} if icc else {}
+        im.save(path, "JPEG", quality=100, subsampling=0, optimize=True, **extra)
 
 
 def thumbnail(path: str | Path, edge: int = 240) -> tuple[Image.Image, tuple[int, int]]:

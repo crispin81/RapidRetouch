@@ -23,6 +23,7 @@ MOUTH_CORNERS = (61, 291)
 LIP_FEATHER = 0.035  # mouth widths: lips fade in from their outline
 SATURATION_RANGE = 0.5  # full slider right scales lip chroma by 1 + this
 MUTE_RANGE = 0.7  # full slider left moves lip colour this far toward the skin's
+HUE_RANGE = 25.0  # degrees the lip colour turns at either end of Lip hue
 LIP_DETAIL = 0.03  # mouth widths: lip lines and flakes are finer than this
 LIP_SHEEN = (6.0, 14.0)  # Lab L above the lip's surround: sheen, kept
 LINES_KEEP = 0.1  # share of dark lip lines left at full smoothing
@@ -37,6 +38,7 @@ TEETH_LIFT = 6.0  # Lab L added at full whitening, less near white
 @dataclass
 class Params:
     lip_saturation: float = 0.0  # -1 muted .. 0 unchanged .. +1 rich
+    lip_hue: float = 0.0  # -1 cooler, pinker .. 0 unchanged .. +1 warmer, more coral
     lip_smooth: float = 0.0
     teeth_whiten: float = 0.0
 
@@ -46,7 +48,7 @@ class Params:
         return cls(**{k: float(v) for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def is_noop(self) -> bool:
-        return self.lip_saturation == 0 and self.lip_smooth <= 0 and self.teeth_whiten <= 0
+        return self.lip_saturation == 0 and self.lip_hue == 0 and self.lip_smooth <= 0 and self.teeth_whiten <= 0
 
 
 def _smoothstep(x, lo, hi):
@@ -103,6 +105,16 @@ def _mouth(lab: np.ndarray, lm: np.ndarray, p: Params) -> None:
         skin_ab = masked_blur(lab[..., 1:], ring, max(0.7, 0.15 * mw))
         t = (MUTE_RANGE * min(-p.lip_saturation, 1.0) * lips)[..., None]
         lab[..., 1:] += t * (skin_ab - lab[..., 1:])
+
+    if p.lip_hue != 0:
+        # Turn the lips' colour around the colour wheel, keeping its strength
+        # and the lips' brightness: toward +b (yellow) is warmer, coral;
+        # toward -b (blue) is cooler, pink to berry.
+        angle = np.deg2rad(HUE_RANGE * float(np.clip(p.lip_hue, -1, 1))) * lips
+        a, b = lab[..., 1].copy(), lab[..., 2].copy()
+        c, s = np.cos(angle), np.sin(angle)
+        lab[..., 1] = a * c - b * s
+        lab[..., 2] = a * s + b * c
 
     if p.teeth_whiten > 0:
         t = teeth_mask(lab, inner, mw) * p.teeth_whiten

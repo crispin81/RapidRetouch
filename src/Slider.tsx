@@ -11,6 +11,9 @@ interface Props {
   format?: (v: number) => string;
   /** Two-sided slider (e.g. matte .. gloss): the fill grows from the centre. */
   centred?: boolean;
+  /** A colour scale (CSS gradient) shown as a thin bar above the track, for
+   * sliders that move along colours (e.g. hue). */
+  scale?: string;
   onChange: (v: number) => void;
 }
 
@@ -26,6 +29,7 @@ export default function Slider({
   disabled,
   format = (v) => v.toFixed(2),
   centred,
+  scale,
   onChange,
 }: Props) {
   const pct = ((value - min) / (max - min)) * 100;
@@ -38,6 +42,7 @@ export default function Slider({
         <span>{label}</span>
         <span className="slider__value">{format(value)}</span>
       </span>
+      {scale && <span className="slider__scale" style={{ background: scale }} />}
       <input
         type="range"
         min={min}

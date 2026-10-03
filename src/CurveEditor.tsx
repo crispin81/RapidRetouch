@@ -129,6 +129,10 @@ export default function CurveEditor({ points: pts, disabled, onChange }: Props) 
 
   return (
     <div className={`curves${disabled ? " curves--disabled" : ""}`}>
+      <span className="slider__head" title="Changes light only, never colour">
+        <span>Luminosity curve</span>
+        <span className="slider__value">light only</span>
+      </span>
       <svg
         ref={svgRef}
         className="curves__graph"
@@ -160,7 +164,7 @@ export default function CurveEditor({ points: pts, disabled, onChange }: Props) 
         ))}
       </svg>
       <p className="curves__hint">
-        Brightness only, so colours stay put. For more contrast, raise the upper part and lower the shadows (an
+        Changes light only, never colour. For more contrast, raise the upper part and lower the shadows (an
         S-curve). Double-click a point to remove it.
       </p>
     </div>

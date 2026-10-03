@@ -34,3 +34,29 @@ def test_contrast_curve_leaves_colour_alone():
     after = cv2.cvtColor(out, cv2.COLOR_RGB2Lab)[0, 0]
     assert after[0] > before[0] + 1  # brighter (a light tone on an S-curve)
     np.testing.assert_allclose(after[1:], before[1:], atol=0.5)  # same colour
+
+
+def test_vibrance_protects_skin_and_boosts_dull_colours_most():
+    import cv2
+
+    def lab_patch(L, a, b):
+        return cv2.cvtColor(np.full((4, 4, 3), (L, a, b), np.float32), cv2.COLOR_Lab2RGB)
+
+    skin_rgb, blue_rgb, grey_blue = lab_patch(65, 15, 18), lab_patch(50, 10, -45), lab_patch(55, 4, -12)
+    chroma = lambda rgb: float(np.hypot(*cv2.cvtColor(rgb, cv2.COLOR_RGB2Lab)[0, 0, 1:]))
+    gain = lambda rgb: chroma(tone.apply(rgb, {"vibrance": 1.0})) / chroma(rgb)
+    assert gain(skin_rgb) < gain(blue_rgb)  # skin protected
+    assert gain(grey_blue) > gain(blue_rgb)  # dull colours gain more (vibrance)
+    assert chroma(tone.apply(blue_rgb, {"vibrance": -1.0})) < 0.1 * chroma(blue_rgb)  # -1: near grey
+    assert not tone.is_noop({"vibrance": 0.2})
+
+
+def test_white_balance_warms_cools_and_tints_without_changing_brightness():
+    grey = np.full((4, 4, 3), 0.5, np.float32)
+    warm = tone.apply(grey, {"temperature": 1.0})[0, 0]
+    cool = tone.apply(grey, {"temperature": -1.0})[0, 0]
+    magenta = tone.apply(grey, {"tint": 1.0})[0, 0]
+    assert warm[0] > warm[2] and cool[2] > cool[0]
+    assert magenta[1] < magenta[0] and magenta[1] < magenta[2]
+    Y = lambda rgb: float(srgb_to_linear(rgb) @ np.array([0.2126, 0.7152, 0.0722]))
+    assert abs(Y(warm) - Y(grey[0, 0])) < 0.01 and abs(Y(magenta) - Y(grey[0, 0])) < 0.01

@@ -294,6 +294,14 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
+/* A slider's colour scale (e.g. Lip hue): a thin bar just above the track. */
+.slider__scale {
+  display: block;
+  height: 4px;
+  margin-bottom: -2px;
+  border-radius: 2px;
+}
+
 /* Custom-styled rather than left to the native OS slider widget, which renders
    inconsistently across platforms. The gold/grey fill split is set inline. */
 .slider input[type="range"] {
@@ -765,6 +773,12 @@ button.primary {
   gap: 8px;
 }
 
+/* The curve's heading, styled like a slider label. */
+.curves .slider__head {
+  font-size: 12px;
+  color: #b7b8c2;
+}
+
 .curves--disabled {
   opacity: 0.5;
   pointer-events: none;
@@ -1161,4 +1175,164 @@ button.primary {
 .toolbar__about {
   margin-left: 14px;
   color: #ffcc33;
+}
+
+/* Crop */
+.cropbar .tabs button {
+  padding: 4px 6px;
+}
+
+.cropbar__angle {
+  width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Export */
+.export {
+  width: 520px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.export__options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.export__option {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #8d8e99;
+}
+
+.export__option .tabs button {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.export__folder {
+  margin-left: 72px;
+  font-size: 11px;
+  color: #c9cad3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export__note {
+  margin: 0;
+  font-size: 11px;
+  color: #8d8e99;
+}
+
+.export__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.export__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border-radius: 6px;
+  background: #22232b;
+}
+
+.export__row img,
+.export__thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #2f3039;
+  flex: none;
+}
+
+.export__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.export__name {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.export__name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export__state {
+  display: flex;
+  align-items: center;
+  color: #8d8e99;
+  font-variant-numeric: tabular-nums;
+}
+
+.export__row--done .export__state {
+  color: #6fcf7a;
+}
+
+.export__row--failed .export__state,
+.export__row--failed .export__message {
+  color: #ff7a6b;
+}
+
+.export__bar {
+  height: 4px;
+  border-radius: 2px;
+  background: #3a3b45;
+  overflow: hidden;
+}
+
+.export__bar > div {
+  height: 100%;
+  background: #ffcc33;
+  transition: width 0.3s ease;
+}
+
+.export__row--done .export__bar > div {
+  background: #6fcf7a;
+}
+
+.export__row--failed .export__bar > div {
+  background: #ff7a6b;
+}
+
+.export__message {
+  font-size: 11px;
+  color: #8d8e99;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export__total {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #c9cad3;
 }

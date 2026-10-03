@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   FolderOpen,
@@ -22,6 +22,7 @@ import {
   ChevronsUpDown,
   Sun,
   Lasso,
+  Crop as CropIcon,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -37,9 +38,11 @@ import {
   onEngineEvent,
 } from "./api";
 import About from "./About";
+import ExportDialog, { ExportFormat, ExportRow } from "./ExportDialog";
 import BrushBar from "./BrushBar";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
+import CropOverlay, { Crop, NO_CROP, cropToRatio, fitCrop, isNoCrop } from "./CropOverlay";
 import CurveEditor, { IDENTITY, Point } from "./CurveEditor";
 import PresetMenu, { Preset } from "./PresetMenu";
 import Slider from "./Slider";
@@ -56,12 +59,20 @@ interface PhotoSettings {
   dodgeBurn: DodgeBurnParams;
   creases: number; // clothes crease smoothing 0..1
   tone: Tone;
+  crop: Crop; // straighten and crop, applied at export; not part of presets
 }
 interface Tone {
+  temperature: number; // -1 bluer .. +1 warmer
+  tint: number; // -1 greener .. +1 more magenta
   ev: number;
+  vibrance: number; // -1 .. +1, skin tones protected, dull colours gain most (like Lightroom's)
   curve: Point[]; // luminosity curve
 }
-const TONE_DEFAULTS: Tone = { ev: 0, curve: IDENTITY };
+const TONE_DEFAULTS: Tone = { temperature: 0, tint: 0, ev: 0, vibrance: 0, curve: IDENTITY };
+// Colour bars for the white balance sliders.
+const TEMPERATURE_SCALE = "linear-gradient(to right, #4a86d8, #b9c3cf, #e0a74a)";
+const TINT_SCALE = "linear-gradient(to right, #5fae58, #c0c0c0, #c45cb8)";
+const signed = (v: number) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2));
 const sameValues = (a: object, b: object) => JSON.stringify(a) === JSON.stringify(b);
 const sameSettings = (a: PhotoSettings, b: PhotoSettings) => sameValues(a, b);
 
@@ -69,6 +80,7 @@ const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
 // No tutorial video yet: the banner does nothing until this is set.
 const TUTORIAL_VIDEO_URL: string | null = null;
 const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
+const EXPORT_FORMAT_KEY = "rapidretouch.exportFormat";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
 // Scanning: a photo is only opened and processed after this long on it (or as
@@ -117,12 +129,17 @@ const EYE_DEFAULTS: EyesParams = {
   wrinkles: 0,
   whites: 0,
   iris: 0,
+  iris_saturation: 0,
+  iris_hue: 0,
   catchlight: 0,
   veins: 0,
   lashes: 0,
 };
 
-const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
+// Iris hue's colour scale until the photo's own irises are measured, as it
+// moves blue eyes: teal-green to the left, violet to the right.
+const IRIS_HUE_SCALE = "linear-gradient(to right, #3f9e7d, #3f8fa8, #4a78c0, #6c68c4, #9160bd)";
+const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string; centred?: boolean; scale?: string }[] = [
   {
     key: "dark_circles",
     label: "Dark circles",
@@ -152,6 +169,19 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string }[] = [
     key: "iris",
     label: "Iris",
     hint: "Bring out iris detail and colour; the pupil and the dark outer ring are kept",
+  },
+  {
+    key: "iris_saturation",
+    label: "Iris saturation",
+    hint: "Left mutes the iris colour, right makes it richer; pupils, catchlights and whites are left alone",
+    centred: true,
+  },
+  {
+    key: "iris_hue",
+    label: "Iris hue",
+    hint: "Turns the iris colour around the colour wheel: blue eyes toward violet (right) or teal-green (left), brown toward gold (right) or red-brown (left). Pupils, catchlights and whites are left alone",
+    centred: true,
+    scale: IRIS_HUE_SCALE,
   },
   {
     key: "catchlight",
@@ -242,7 +272,7 @@ const DODGE_BURN_SLIDERS: { key: keyof DodgeBurnParams; label: string; hint: str
   { key: "shadows", label: "Shadows", hint: "Deepen the shadows already on the face: the contours, not the whole shaded side" },
 ];
 const SKIN_REGION_DEFAULTS: SkinRegion = {
-  blemishes: 0,
+  acne: 0,
   smooth: 0,
   even: 0,
   shine: 0,
@@ -269,17 +299,42 @@ const SKIN_DEFAULTS: SkinParams = {
   body: SKIN_REGION_DEFAULTS,
 };
 type SkinTab = keyof SkinParams;
-const MOUTH_DEFAULTS: MouthParams = { lip_saturation: 0, lip_smooth: 0, teeth_whiten: 0 };
-const MOUTH_SLIDERS: { key: keyof MouthParams; label: string; hint: string; centred?: boolean }[] = [
+const MOUTH_DEFAULTS: MouthParams = { lip_saturation: 0, lip_hue: 0, lip_smooth: 0, teeth_whiten: 0 };
+// Lip hue's colour scale: cooler, pinker to the left, warmer, more coral to the right.
+const LIP_HUE_SCALE = "linear-gradient(to right, #b8326f, #c73a52, #c8322f, #d9533a, #e8763c)";
+const MOUTH_SLIDERS: {
+  key: keyof MouthParams;
+  label: string;
+  hint: string;
+  centred?: boolean;
+  scale?: string;
+}[] = [
+  {
+    key: "lip_hue",
+    label: "Lip hue",
+    hint: "Left makes the lips cooler and pinker, right warmer and more coral; their brightness is kept",
+    centred: true,
+    scale: LIP_HUE_SCALE,
+  },
   {
     key: "lip_saturation",
-    label: "Lip colour",
+    label: "Lip saturation",
     hint: "Left mutes the lips toward the skin's colour, right makes them richer",
     centred: true,
   },
   { key: "lip_smooth", label: "Lip smoothing", hint: "Soften dry lines, flakes and spots on the lips; the sheen is kept" },
   { key: "teeth_whiten", label: "Teeth whitening", hint: "Take out yellow and brighten the teeth a little; gums and lips are left alone" },
 ];
+// Crop shapes; "Original" is the photo's own.
+const CROP_ASPECTS = ["Free", "Original", "1:1", "4:5", "5:4", "2:3", "3:2", "16:9"];
+/** Width / height for a crop shape, or null for free. */
+function aspectRatio(aspect: string, width: number, height: number): number | null {
+  if (aspect === "Free") return null;
+  if (aspect === "Original") return width / height;
+  const [w, h] = aspect.split(":").map(Number);
+  return w / h;
+}
+
 const ALL_DEFAULTS: PhotoSettings = {
   backdrop: DEFAULTS,
   outdoor: false,
@@ -289,22 +344,30 @@ const ALL_DEFAULTS: PhotoSettings = {
   dodgeBurn: DODGE_BURN_DEFAULTS,
   creases: 0,
   tone: TONE_DEFAULTS,
+  crop: NO_CROP,
 };
 /** A preset's settings as full PhotoSettings: anything the preset doesn't have
  * (a slider added since it was saved) takes its default. */
-function withPreset(saved: Record<string, unknown>, outdoor: boolean): PhotoSettings {
+function withPreset(saved: Record<string, unknown>, outdoor: boolean, crop: Crop = NO_CROP): PhotoSettings {
   const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
   const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
   const skin = obj(saved.skin);
+  // A skin region, with Blemishes (before the Acne rebuild) carried over to Acne.
+  const region = (defaults: SkinRegion, savedRegion: unknown): SkinRegion => {
+    const { blemishes, ...rest } = obj(savedRegion);
+    const merged = { ...defaults, ...rest } as SkinRegion;
+    if (typeof blemishes === "number" && !("acne" in rest)) merged.acne = blemishes;
+    return merged;
+  };
   const tone = obj(saved.tone);
   return {
     backdrop: { ...ALL_DEFAULTS.backdrop, ...obj(saved.backdrop) },
     outdoor,
     eyes: { ...ALL_DEFAULTS.eyes, ...obj(saved.eyes) },
     skin: {
-      face: { ...ALL_DEFAULTS.skin.face, ...obj(skin.face) },
-      neck: { ...ALL_DEFAULTS.skin.neck, ...obj(skin.neck) },
-      body: { ...ALL_DEFAULTS.skin.body, ...obj(skin.body) },
+      face: region(ALL_DEFAULTS.skin.face, skin.face),
+      neck: region(ALL_DEFAULTS.skin.neck, skin.neck),
+      body: region(ALL_DEFAULTS.skin.body, skin.body),
     },
     mouth: { ...ALL_DEFAULTS.mouth, ...obj(saved.mouth) },
     // Presets saved before the split had one Sculpt number: it was the
@@ -315,9 +378,13 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean): PhotoSett
         : { ...DODGE_BURN_DEFAULTS, ...obj(saved.dodgeBurn) },
     creases: num(saved.creases, 0),
     tone: {
+      temperature: num(tone.temperature, 0),
+      tint: num(tone.tint, 0),
       ev: num(tone.ev, 0),
+      vibrance: num(tone.vibrance, 0),
       curve: Array.isArray(tone.curve) ? (tone.curve as Point[]) : IDENTITY,
     },
+    crop,
   };
 }
 
@@ -333,7 +400,12 @@ const SKIN_SLIDERS: {
   min: number;
   centred?: boolean;
 }[] = [
-  { key: "blemishes", label: "Blemishes", hint: "Heal small spots and marks; skin texture is kept", min: 0 },
+  {
+    key: "acne",
+    label: "Acne",
+    hint: "Heal spots, acne and small marks: low takes only the clearest, high fainter ones too. Moles and pores are kept",
+    min: 0,
+  },
   { key: "smooth", label: "Smooth", hint: "Even out blotchy light and shade; pores and fine texture are kept", min: 0 },
   {
     key: "texture",
@@ -566,6 +638,26 @@ export default function App() {
   const dodgeBurnRef = useRef(dodgeBurn);
   const creasesRef = useRef(creases);
   const toneRef = useRef(toneParams);
+  const [crop, setCrop] = useState<Crop>(NO_CROP);
+  // Iris hue's colour bar for the open photo's eyes (null: the blue-eye default).
+  const [irisScale, setIrisScale] = useState<string[] | null>(null);
+  const irisScaleFor = useRef<string | null>(null);
+  const [exportRows, setExportRows] = useState<ExportRow[] | null>(null);
+  const [exportRunning, setExportRunning] = useState(false);
+  const [exportCancelling, setExportCancelling] = useState(false);
+  const exportCancel = useRef(false);
+  const exportingPath = useRef<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>(() => {
+    try {
+      return localStorage.getItem(EXPORT_FORMAT_KEY) === "jpeg" ? "jpeg" : "tiff";
+    } catch {
+      return "tiff";
+    }
+  });
+  const [exportFolder, setExportFolder] = useState<string | null>(null);
+  const cropRef = useRef(crop);
+  const [cropping, setCropping] = useState(false);
+  const [cropAspect, setCropAspect] = useState<string>("Free");
   const [outdoor, setOutdoor] = useState(false);
   // Photos whose Backdrop/Outdoor mode was set by detection, not by the user
   // (shown as "auto"); any click on the mode buttons makes it the user's.
@@ -587,11 +679,27 @@ export default function App() {
     clothes: creasesRef.current > 0 ? { creases: creasesRef.current } : null,
     tone: sameValues(toneRef.current, TONE_DEFAULTS) ? null : toneRef.current,
   });
+  /** The same, for any photo's settings (batch export). */
+  const lookArgsFor = (st: PhotoSettings): Record<string, unknown> => ({
+    backdrop: st.outdoor ? null : st.backdrop,
+    eyes: st.eyes,
+    skin: st.skin,
+    mouth: st.mouth,
+    dodge_burn: sameValues(st.dodgeBurn, DODGE_BURN_DEFAULTS) ? null : st.dodgeBurn,
+    clothes: st.creases > 0 ? { creases: st.creases } : null,
+    tone: sameValues(st.tone, TONE_DEFAULTS) ? null : st.tone,
+  });
 
   useEffect(() => {
     const unlisten = onEngineEvent((e) => {
       if (e.event === "status") {
         setStatus(e.message);
+      } else if (e.event === "progress") {
+        const path = exportingPath.current;
+        if (path)
+          setExportRows((rows) =>
+            rows && rows.map((r) => (r.path === path ? { ...r, fraction: Math.max(r.fraction, e.fraction) } : r)),
+          );
       } else if (e.event === "stopped") {
         setEngineReady(false);
         setError("The engine stopped. Restart the app.");
@@ -701,6 +809,16 @@ export default function App() {
         setFaces(r.faces);
       } while (dirty.current);
       setStatus("Ready");
+      // Iris hue's colour bar, from this photo's own irises (once per photo).
+      const forPath = openedPath.current;
+      if (forPath && irisScaleFor.current !== forPath) {
+        irisScaleFor.current = forPath;
+        call<{ colours: string[] | null }>("iris_scale")
+          .then(({ colours }) => {
+            if (activePath.current === forPath) setIrisScale(colours);
+          })
+          .catch(() => undefined);
+      }
     } catch (e) {
       handleError(e);
     } finally {
@@ -768,6 +886,18 @@ export default function App() {
     toneRef.current = next;
     setToneParams(next);
     render();
+  };
+
+  // Crop only changes the export, so there's nothing to re-render.
+  const updateCrop = (next: Crop) => {
+    cropRef.current = next;
+    setCrop(next);
+  };
+  const startCropping = () => {
+    setBrushOn(false);
+    setZoomTool(false);
+    setView("result");
+    setCropping(true);
   };
 
   const updateCreases = (value: number) => {
@@ -849,6 +979,17 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!image || e.target instanceof HTMLInputElement) return;
+      if (cropping) {
+        if (e.key === "Enter" || e.key === "Escape" || e.key === "c" || e.key === "C") {
+          e.preventDefault();
+          setCropping(false);
+        }
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && (e.key === "c" || e.key === "C") && view !== "mask" && view !== "area") {
+        startCropping();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (view === "mask") {
@@ -904,6 +1045,7 @@ export default function App() {
     dodgeBurn: dodgeBurnRef.current,
     creases: creasesRef.current,
     tone: toneRef.current,
+    crop: cropRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
@@ -923,6 +1065,8 @@ export default function App() {
     setCreases(st.creases);
     toneRef.current = st.tone;
     setToneParams(st.tone);
+    cropRef.current = st.crop;
+    setCrop(st.crop);
   };
 
   const markEdited = (path: string, st: PhotoSettings) =>
@@ -945,6 +1089,7 @@ export default function App() {
       markEdited(current, currentSettings());
     }
     activePath.current = path;
+    if (irisScaleFor.current !== path) setIrisScale(null);
     window.clearTimeout(openTimer.current);
     stopCountdown();
     setError(null);
@@ -1125,7 +1270,7 @@ export default function App() {
     return paths.length ? paths : image ? [image.path] : [];
   };
   const savePreset = async (name: string) => {
-    const { outdoor: _mode, ...settings } = currentSettings();
+    const { outdoor: _mode, crop: _crop, ...settings } = currentSettings();
     try {
       setPresets(await call<Preset[]>("save_preset", { name, settings }));
       setStatus(`Saved preset "${name}"`);
@@ -1146,7 +1291,7 @@ export default function App() {
     for (const path of targets) {
       const current =
         path === image?.path ? currentSettings() : (settingsByPath.current.get(path) ?? ALL_DEFAULTS);
-      const st = withPreset(preset.settings, current.outdoor);
+      const st = withPreset(preset.settings, current.outdoor, current.crop);
       if (path === image?.path) {
         applySettings(st);
         render();
@@ -1390,26 +1535,75 @@ export default function App() {
     return () => window.clearTimeout(detailTimer.current);
   }, [result, compareImg, view, compareStep, requestDetail]);
 
-  const exportImage = async () => {
-    if (!image || !(await ensureOpen())) return;
-    const stem = image.path.replace(/\.[^./]+$/, "");
-    const path = await save({
-      defaultPath: `${stem}_retouched.tif`,
-      filters: [{ name: "TIFF", extensions: bothCases(["tif", "tiff"]) }],
-    });
-    if (!path) return;
-    setBusy(true);
-    try {
-      const r = await call<{ path: string }>("export", {
+  // Export: the film-strip selection (or the photo being edited), each photo
+  // with its own settings, one after another, each with its own progress bar.
+  const openExport = () => {
+    if (!image) return;
+    setExportRows(
+      presetTargets().map((path) => ({
         path,
-        ...lookArgs(),
-      });
-      setStatus(`Exported ${r.path.split("/").pop()}`);
-    } catch (e) {
-      handleError(e);
-    } finally {
-      setBusy(false);
+        thumb: strip.find((i) => i.path === path)?.thumb,
+        state: "waiting",
+        fraction: 0,
+      })),
+    );
+  };
+  const chooseExportFolder = async () => {
+    const dir = await open({ directory: true, defaultPath: exportFolder ?? readLastDir() ?? undefined });
+    if (typeof dir === "string") setExportFolder(dir);
+  };
+  const runExport = async () => {
+    if (!exportRows) return;
+    const update = (path: string, patch: Partial<ExportRow>) =>
+      setExportRows((rows) => rows && rows.map((r) => (r.path === path ? { ...r, ...patch } : r)));
+    exportCancel.current = false;
+    setExportCancelling(false);
+    setExportRunning(true);
+    setBusy(true);
+    const ext = exportFormat === "tiff" ? "tif" : "jpg";
+    // The photo the engine has open goes first: it's ready to go.
+    const order = exportRows
+      .map((r) => r.path)
+      .sort((a, b) => Number(b === openedPath.current) - Number(a === openedPath.current));
+    for (const path of order) {
+      if (exportCancel.current) {
+        update(path, { state: "cancelled" });
+        continue;
+      }
+      exportingPath.current = path;
+      update(path, { state: "exporting", fraction: 0.02 });
+      try {
+        const st =
+          path === activePath.current
+            ? currentSettings()
+            : (settingsByPath.current.get(path) ?? {
+                ...ALL_DEFAULTS,
+                outdoor: strip.find((i) => i.path === path)?.scene === "outdoor",
+              });
+        if (openedPath.current !== path) {
+          const r = await call<OpenResult>("open", { path });
+          openedPath.current = path;
+          openedInfo.current = { ...r, path };
+        }
+        const stem = path.replace(/\.[^./]+$/, "");
+        const out = exportFolder
+          ? `${exportFolder}/${stem.split("/").pop()}_retouched.${ext}`
+          : `${stem}_retouched.${ext}`;
+        const r = await call<{ path: string }>("export", {
+          path: out,
+          ...lookArgsFor(st),
+          crop: isNoCrop(st.crop) ? null : st.crop,
+        });
+        update(path, { state: "done", fraction: 1, message: r.path });
+      } catch (e) {
+        update(path, { state: "failed", message: errorMessage(e) });
+      }
     }
+    exportingPath.current = null;
+    setExportRunning(false);
+    setBusy(false);
+    // Back to the photo being edited.
+    if (activePath.current && openedPath.current !== activePath.current && (await ensureOpen())) render();
   };
 
   const acceptLicence = async () => {
@@ -1460,7 +1654,11 @@ export default function App() {
         <button onClick={openImage} disabled={!engineReady}>
           <FolderOpen size={16} /> Open
         </button>
-        <button onClick={exportImage} disabled={!image || busy}>
+        <button
+          onClick={openExport}
+          disabled={!image || busy}
+          title="Export the photos selected in the film strip, or the one being edited"
+        >
           <Download size={16} /> Export
         </button>
         <button
@@ -1472,6 +1670,14 @@ export default function App() {
           title="Hold to see the untouched original"
         >
           <Eye size={16} /> Original
+        </button>
+        <button
+          disabled={!image || view === "mask" || view === "area"}
+          onClick={() => (cropping ? setCropping(false) : startCropping())}
+          className={cropping ? "active" : ""}
+          title="Crop & straighten (C). Applied when you export"
+        >
+          <CropIcon size={16} /> Crop
         </button>
         <div className="toolbar__group">
           <button
@@ -1524,7 +1730,18 @@ export default function App() {
         >
           {({ panning }) => (
             <>
-              {image && view === "result" && brushMode !== "patch" && (
+              {image && (view === "result" || view === "before" || view === "compare") && (cropping || !isNoCrop(crop)) && (
+                <CropOverlay
+                  image={imgEl}
+                  width={image.width}
+                  height={image.height}
+                  crop={crop}
+                  editing={cropping && !panning}
+                  ratio={cropping ? aspectRatio(cropAspect, image.width, image.height) : null}
+                  onChange={updateCrop}
+                />
+              )}
+              {image && view === "result" && !cropping && brushMode !== "patch" && (
                 <PaintOverlay
                   image={imgEl}
                   active={brushOn && !panning && !zoomTool}
@@ -1534,7 +1751,7 @@ export default function App() {
                   colour={BRUSH_COLOURS[brushMode]}
                 />
               )}
-              {image && view === "result" && brushOn && brushMode === "patch" && (
+              {image && view === "result" && !cropping && brushOn && brushMode === "patch" && (
                 <PatchOverlay
                   image={imgEl}
                   active={!panning && !zoomTool}
@@ -1566,6 +1783,49 @@ export default function App() {
           )}
         </Viewer>
         {view === "before" && <div className="viewer__badge">Original</div>}
+        {cropping && image && (
+          <div className="brushbar cropbar">
+            <span className="brushbar__what">Crop</span>
+            <label className="brushbar__size" title="Straighten: turn the photo (double-click to reset)">
+              Straighten
+              <input
+                type="range"
+                min={-45}
+                max={45}
+                step={0.1}
+                value={crop.angle}
+                onDoubleClick={() => updateCrop(fitCrop({ ...cropRef.current, angle: 0 }, image.width, image.height))}
+                onChange={(e) => {
+                  const next = fitCrop({ ...cropRef.current, angle: Number(e.target.value) }, image.width, image.height);
+                  const r = aspectRatio(cropAspect, image.width, image.height);
+                  updateCrop(r === null ? next : cropToRatio(next, r, image.width, image.height));
+                }}
+              />
+              <span className="cropbar__angle">{crop.angle > 0 ? "+" : ""}{crop.angle.toFixed(1)}°</span>
+            </label>
+            <div className="tabs">
+              {CROP_ASPECTS.map((a) => (
+                <button
+                  key={a}
+                  className={cropAspect === a ? "active" : ""}
+                  onClick={() => {
+                    setCropAspect(a);
+                    const r = aspectRatio(a, image.width, image.height);
+                    if (r !== null) updateCrop(cropToRatio(cropRef.current, r, image.width, image.height));
+                  }}
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => updateCrop(NO_CROP)} title="Back to the whole photo, unturned">
+              <RotateCcw size={14} /> Reset
+            </button>
+            <button className="brushbar__done" onClick={() => setCropping(false)} title="Enter">
+              Done
+            </button>
+          </div>
+        )}
         {view === "mask" && (
           <BrushBar
             what="Subject mask"
@@ -1756,6 +2016,34 @@ export default function App() {
           {...panel("tone")}
         >
           <Slider
+            label="Temperature"
+            hint="White balance: left bluer, right warmer (amber); brightness is kept"
+            min={-1}
+            max={1}
+            step={0.01}
+            centred
+            scale={TEMPERATURE_SCALE}
+            value={toneParams.temperature}
+            defaultValue={0}
+            format={signed}
+            disabled={!image}
+            onChange={(v) => updateTone({ ...toneRef.current, temperature: v })}
+          />
+          <Slider
+            label="Tint"
+            hint="White balance: left greener, right more magenta; brightness is kept"
+            min={-1}
+            max={1}
+            step={0.01}
+            centred
+            scale={TINT_SCALE}
+            value={toneParams.tint}
+            defaultValue={0}
+            format={signed}
+            disabled={!image}
+            onChange={(v) => updateTone({ ...toneRef.current, tint: v })}
+          />
+          <Slider
             label="Exposure"
             hint="Brighten or darken the whole photo, in stops (EV)"
             min={-2.5}
@@ -1767,6 +2055,19 @@ export default function App() {
             format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)} EV`}
             disabled={!image}
             onChange={(v) => updateTone({ ...toneRef.current, ev: v })}
+          />
+          <Slider
+            label="Vibrance"
+            hint="Richer or more muted colour across the photo, like Lightroom's Vibrance: skin tones are protected and dull colours gain most"
+            min={-1}
+            max={1}
+            step={0.01}
+            centred
+            value={toneParams.vibrance}
+            defaultValue={0}
+            format={signed}
+            disabled={!image}
+            onChange={(v) => updateTone({ ...toneRef.current, vibrance: v })}
           />
           <CurveEditor
             points={toneParams.curve}
@@ -2075,9 +2376,12 @@ export default function App() {
               key={s.key}
               label={s.label}
               hint={s.hint}
-              min={0}
+              min={s.centred ? -1 : 0}
               max={1}
               step={0.01}
+              centred={s.centred}
+              scale={s.key === "iris_hue" && irisScale ? `linear-gradient(to right, ${irisScale.join(", ")})` : s.scale}
+              format={s.centred ? signed : undefined}
               value={eyesParams[s.key]}
               defaultValue={EYE_DEFAULTS[s.key]}
               disabled={!image}
@@ -2087,7 +2391,7 @@ export default function App() {
           <div className="panel__buttons">
             <button
               disabled={
-                !image || (view === "mask" || view === "area") || Object.values(eyesParams).every((v) => v <= 0)
+                !image || (view === "mask" || view === "area") || Object.values(eyesParams).every((v) => v === 0)
               }
               onPointerEnter={() => prefetchWithout("eyes")}
               {...holdHandlers(() => holdWithout("eyes"), releaseCompare)}
@@ -2125,6 +2429,7 @@ export default function App() {
               max={1}
               step={0.01}
               centred={s.centred}
+              scale={s.scale}
               value={mouthParams[s.key]}
               defaultValue={MOUTH_DEFAULTS[s.key]}
               format={s.centred ? (v) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2)) : undefined}
@@ -2191,7 +2496,7 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams },
+                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams, crop },
                     ALL_DEFAULTS,
                   ),
                 }
@@ -2245,6 +2550,31 @@ export default function App() {
         </a>
       </footer>
 
+      {exportRows && (
+        <ExportDialog
+          rows={exportRows}
+          format={exportFormat}
+          folder={exportFolder}
+          running={exportRunning}
+          cancelling={exportCancelling}
+          onFormat={(f) => {
+            setExportFormat(f);
+            try {
+              localStorage.setItem(EXPORT_FORMAT_KEY, f);
+            } catch {
+              // only a convenience
+            }
+          }}
+          onChooseFolder={chooseExportFolder}
+          onSameFolder={() => setExportFolder(null)}
+          onStart={runExport}
+          onCancel={() => {
+            exportCancel.current = true;
+            setExportCancelling(true);
+          }}
+          onClose={() => setExportRows(null)}
+        />
+      )}
       {aboutModels && <About models={aboutModels} onClose={() => setAboutModels(null)} />}
       {licencePrompt && (
         <div className="modal">

@@ -150,6 +150,11 @@ IRIS_DETAIL = (0.012, 0.08)  # fibre band: finer is noise, coarser is shading
 IRIS_DETAIL_GAIN = 0.8
 IRIS_DETAIL_CLIP = 6.0  # Lab L
 IRIS_SATURATION = 0.6
+IRIS_SAT_RANGE = 0.8  # Iris saturation at either end: colour x (1 +/- this)
+IRIS_HUE_RANGE = 75.0  # degrees the iris colour turns at either end of Iris hue
+# Brown irises carry little colour, so turning it alone barely shows: at either
+# end of Iris hue the iris's colour strength (Lab chroma) is brought up to this.
+IRIS_HUE_CHROMA = 20.0
 IRIS_MAX_LIFT = 8.0
 LASH_REACH = 0.14  # eye widths: lashes reach this far out from the lid line
 LASH_INSIDE = 0.03  # and start this far inside it (the lash roots on the lid rim)
@@ -178,6 +183,8 @@ class Params:
     wrinkles: float = 0.0
     whites: float = 0.0
     iris: float = 0.0
+    iris_saturation: float = 0.0  # -1 muted .. 0 unchanged .. +1 richer iris colour
+    iris_hue: float = 0.0  # turns the iris colour around the colour wheel, -1 .. +1
     catchlight: float = 0.0
     veins: float = 0.0
     lashes: float = 0.0
@@ -187,7 +194,7 @@ class Params:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def is_noop(self) -> bool:
-        return all(
+        return self.iris_saturation == 0 and self.iris_hue == 0 and all(
             v <= 0
             for v in (
                 self.dark_circles,
@@ -515,11 +522,37 @@ def _eye_itself(lab: np.ndarray, geo: dict, off: np.ndarray, eye_w: float, p: Pa
         not_lash = _smoothstep(Lw, WHITES_NOT_LASH[0] * white_L, WHITES_NOT_LASH[1] * white_L)
         lab[..., 0] += s * not_lash * lift
 
-    if p.iris > 0:
+    if p.iris > 0 or p.iris_saturation != 0 or p.iris_hue != 0:
         pupil_r = _pupil_radius(L, d, r, opening_hard)
         pupil = np.clip((pupil_r - d) / max(0.5, 0.08 * r) + 0.5, 0, 1)
         inner_iris = np.clip((IRIS_EDGE_KEEP * r - d) / max(0.5, 0.1 * r) + 0.5, 0, 1)
-        W = iris_disk * inner_iris * opening * (1 - pupil) * (1 - catch)
+        W_iris = iris_disk * inner_iris * opening * (1 - pupil) * (1 - catch)
+
+    if p.iris_hue != 0:
+        # Turn the iris colour around the colour wheel, keeping its strength
+        # and brightness: blue toward violet (+) or teal-green (-), brown
+        # toward gold (+) or red-brown (-).
+        amount = float(np.clip(p.iris_hue, -1, 1))
+        angle = np.deg2rad(IRIS_HUE_RANGE * amount) * W_iris
+        a, b = lab[..., 1].copy(), lab[..., 2].copy()
+        chroma = np.hypot(a, b)
+        # Grey irises (no hue to turn) and near-black pixels (the pupil's
+        # edge: colour there reads as red-eye) are left alone.
+        floor = IRIS_HUE_CHROMA * abs(amount) * W_iris * _smoothstep(chroma, 1.0, 4.0) * _smoothstep(L, 18.0, 35.0)
+        gain = np.maximum(chroma, floor) / np.maximum(chroma, 1e-3)
+        a, b = a * gain, b * gain
+        c, s_ = np.cos(angle), np.sin(angle)
+        lab[..., 1] = a * c - b * s_
+        lab[..., 2] = a * s_ + b * c
+
+    if p.iris_saturation != 0:
+        # The iris's colour only: pupil, catchlights, the limbal ring and the
+        # whites are left as they are.
+        sat = IRIS_SAT_RANGE * float(np.clip(p.iris_saturation, -1, 1))
+        lab[..., 1:] *= (1 + sat * W_iris)[..., None]
+
+    if p.iris > 0:
+        W = W_iris
         s = p.iris * W
         fine = blur(L, max(0.5, IRIS_DETAIL[0] * eye_w))
         coarse = blur(L, max(0.7, IRIS_DETAIL[1] * eye_w))
@@ -637,7 +670,7 @@ def _correct_eye(rgb: np.ndarray, geo: dict, p: Params) -> None:
         soft = _inner_feather(zone, FEATHER * eye_w)
         _relight(lab, p.eye_bags * BAG_MAX * soft * adjust, eye_w)
 
-    if p.whites > 0 or p.iris > 0 or p.catchlight > 0 or p.veins > 0:
+    if p.whites > 0 or p.iris > 0 or p.iris_saturation != 0 or p.iris_hue != 0 or p.catchlight > 0 or p.veins > 0:
         _eye_itself(lab, geo, off, eye_w, p)
 
     if p.lashes > 0:
@@ -679,3 +712,32 @@ def eye_openings(shape: tuple[int, int], faces: list[np.ndarray]) -> np.ndarray:
             mask = np.maximum(mask, blur(one, max(0.5, 0.02 * eye_w)))
     return mask
 
+
+
+IRIS_SCALE_STOPS = (-1.0, -0.5, 0.0, 0.5, 1.0)
+IRIS_SCALE_L = 55.0  # Lab L the colour bar is shown at, whatever the eye's own brightness
+IRIS_SCALE_CHROMA = 2.2  # the bar's colours a little richer than the eye's, to read at a glance
+
+
+def iris_scale(rgb: np.ndarray, faces: list[np.ndarray]) -> list[str] | None:
+    """The colours Iris hue turns this photo's irises through, from far left to
+    far right, as #rrggbb, for the slider's colour bar; None if no iris was
+    found. Measured by applying Iris hue and averaging over the iris."""
+    base = apply(rgb, faces, Params())
+    # Where Iris hue acts: the change at both ends.
+    moved = np.abs(apply(rgb, faces, Params(iris_hue=1.0)) - base).max(2) + np.abs(
+        apply(rgb, faces, Params(iris_hue=-1.0)) - base
+    ).max(2)
+    if moved.max() <= 0:
+        return None
+    weight = moved / moved.sum()
+    colours = []
+    for amount in IRIS_SCALE_STOPS:
+        out = base if amount == 0 else apply(rgb, faces, Params(iris_hue=amount))
+        mean = (out * weight[..., None]).sum((0, 1)).astype(np.float32)
+        lab = cv2.cvtColor(mean.reshape(1, 1, 3), cv2.COLOR_RGB2Lab)[0, 0]
+        lab[0] = IRIS_SCALE_L
+        lab[1:] *= IRIS_SCALE_CHROMA
+        rgb8 = np.round(np.clip(cv2.cvtColor(lab.reshape(1, 1, 3), cv2.COLOR_Lab2RGB)[0, 0], 0, 1) * 255).astype(int)
+        colours.append("#%02x%02x%02x" % tuple(rgb8))
+    return colours

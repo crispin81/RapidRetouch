@@ -46,13 +46,15 @@ export interface EyesParams {
   wrinkles: number;
   whites: number;
   iris: number;
+  iris_saturation: number; // -1 muted .. 0 unchanged .. +1 richer
+  iris_hue: number; // turns the iris colour around the colour wheel, -1 .. +1
   catchlight: number;
   veins: number;
   lashes: number;
 }
 
 export interface SkinRegion {
-  blemishes: number;
+  acne: number; // spots and acne healed (was blemishes)
   smooth: number;
   even: number;
   shine: number; // -1 matte .. 0 natural .. +1 gloss
@@ -67,6 +69,7 @@ export interface SkinRegion {
 
 export interface MouthParams {
   lip_saturation: number; // -1 muted .. 0 unchanged .. +1 rich
+  lip_hue: number; // -1 cooler, pinker .. 0 unchanged .. +1 warmer, more coral
   lip_smooth: number;
   teeth_whiten: number;
 }
@@ -79,6 +82,7 @@ export interface SkinParams {
 
 export type EngineEvent =
   | { event: "status"; message: string }
+  | { event: "progress"; fraction: number } // how far the export under way is, 0..1
   | { event: "stopped" };
 
 export function call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {

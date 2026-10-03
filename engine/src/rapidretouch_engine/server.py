@@ -27,6 +27,7 @@ from PIL import Image
 from . import imageio, presets
 from .registry import LicenceNotAccepted, Registry
 from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, scene, tone
+from .tools import crop as crop_tool
 from .tools import eyes as eye_tool
 from .tools import mouth as mouth_tool
 from .tools import skin as skin_tool
@@ -50,6 +51,7 @@ METHODS = {
     "undo_region_edit",
     "clear_region_edits",
     "render",
+    "iris_scale",
     "remove",
     "undo_remove",
     "clear_removals",
@@ -127,10 +129,20 @@ class Engine:
         # each): in half precision, tools that make threshold decisions turned
         # the rounding into visible differences depending on slider history.
         self._stage_cache: dict[str, np.ndarray] = {}
-        self._parts: dict[str, np.ndarray] | None = None  # person-parts probabilities (see _clothes)
+        self._parts: dict[str, np.ndarray] | None = None  # person-parts probabilities (see _part)
+        self._acne: tuple | None = None  # (key, spot maps) found at full detail (see _acne_masks)
+        self._iris_scale: tuple | None = None  # (colours,) for the open photo, see iris_scale
+        self._exporting: float | None = None  # progress of the export under way, 0..1
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
+        if self._exporting is not None:
+            # During an export, each step also moves its progress bar on.
+            if message.startswith("Writing"):
+                self._exporting = EXPORT_WRITING
+            else:
+                self._exporting += (EXPORT_WRITING - self._exporting) * EXPORT_STEP
+            self.emit({"event": "progress", "fraction": round(self._exporting, 3)})
 
     # --- methods -----------------------------------------------------------
 
@@ -187,6 +199,8 @@ class Engine:
         self._preview_cache, self._full_found = {}, {}
         self._pretone, self._stage_cache = {}, {}
         self._parts = None
+        self._acne = None
+        self._iris_scale = None
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
         if saved:
@@ -390,6 +404,14 @@ class Engine:
             "faces": len(self.faces) if self.faces is not None else None,
         }
 
+    def iris_scale(self) -> dict:
+        """The colours Iris hue moves this photo's irises through, for the
+        slider's colour bar (see eyes.iris_scale); measured once per photo."""
+        self._require_image()
+        if self._iris_scale is None:
+            self._iris_scale = (eye_tool.iris_scale(self.preview, self._ensure_faces()),)
+        return {"colours": self._iris_scale[0]}
+
     def remove(
         self,
         points: list[list[float]],
@@ -466,16 +488,28 @@ class Engine:
         corr = cache["creases"][1]
         return corr.gain(amount) if corr else None
 
-    def _clothes(self) -> np.ndarray:
-        """Where the person-parts model sees clothing (0..1, on a copy up to
-        1024 px), found once per photo from the original."""
+    def _part(self, name: str) -> np.ndarray:
+        """Where the person-parts model sees ``name`` ("clothes", "hair", ...),
+        0..1 on a copy up to 1024 px, found once per photo from the original."""
         if self._parts is None:
             manifest = self.registry.default_for("person_parts")
             self.status(f"Loading {manifest.name} (first run downloads it)")
             model = self.registry.get(manifest.id)
-            self.status("Telling skin from clothes")
+            self.status("Telling skin from hair and clothes")
             self._parts = model.predict(self.image.rgb)
-        return self._parts["clothes"]
+        return self._parts[name]
+
+    def _acne_masks(self, amount: float, edits: list[dict]) -> list:
+        """Acne's spot maps found on the full-resolution photo, remembered for
+        the last setting (see skin.acne_masks)."""
+        key = json.dumps([amount, edits])
+        if self._acne is None or self._acne[0] != key:
+            self.status("Finding spots")
+            self._acne = (key, skin_tool.acne_masks(self.image.rgb, self._ensure_faces(), amount, edits, self._part("hair")))
+        return self._acne[1]
+
+    def _clothes(self) -> np.ndarray:
+        return self._part("clothes")
 
     def _body_people(self, rgb: np.ndarray, alpha: np.ndarray, cache: dict, key) -> list:
         """Each person's neck and body skin, found in ``rgb`` (the photo after
@@ -540,7 +574,12 @@ class Engine:
             face_edits = list(self.region_edits["face"])
 
             def run(rgb, steps):
-                rgb = skin_tool.apply(rgb, self._ensure_faces(), skin.get("face"), face_edits)
+                # Smaller than the photo (the preview): Acne's spots are found
+                # at full detail, so the preview and the zoomed-in view agree.
+                acne = None
+                if face_p.acne > 0 and rgb.shape[1] < self.image.rgb.shape[1]:
+                    acne = self._acne_masks(face_p.acne, face_edits)
+                rgb = skin_tool.apply(rgb, self._ensure_faces(), skin.get("face"), face_edits, self._part("hair"), acne)
                 if steps is not None:
                     steps.append({"tool": "skin", "face": asdict(face_p), "area_edits": face_edits,
                                   "faces": len(self.faces), "models": landmarks()})
@@ -567,7 +606,7 @@ class Engine:
         db_p = dodge_burn.Params.from_dict(look["dodge_burn"])
         if not db_p.is_noop():
             def run(rgb, steps):
-                rgb = dodge_burn.apply(rgb, self._ensure_faces(), db_p)
+                rgb = dodge_burn.apply(rgb, self._ensure_faces(), db_p, self._part("hair"))
                 if steps is not None:
                     steps.append({"tool": "dodge_burn", "params": asdict(db_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
@@ -735,22 +774,29 @@ class Engine:
         crop = tone.apply(crop, look["tone"])
         return {"image": _jpeg_b64(crop), "region": [x0, y0, x1, y1]}
 
-    def export(self, path: str, **look) -> dict:
-        """Export the retouched photo at full resolution as a 16-bit TIFF
-        (lossless, colour profile embedded), whatever the original was: the
-        highest quality for further editing. A name without a TIFF extension
-        gets one."""
+    def export(self, path: str, crop: dict | None = None, **look) -> dict:
+        """Export the retouched photo at full resolution, colour profile
+        embedded: a 16-bit TIFF (lossless, the highest quality for further
+        editing) or a maximum-quality JPEG, by the file's extension. Any other
+        name gets ".tif"."""
         self._require_image()
         out = Path(path)
-        if out.suffix.lower() not in (".tif", ".tiff"):
+        if out.suffix.lower() not in (".tif", ".tiff", ".jpg", ".jpeg"):
             out = out.with_name(out.name + ".tif")
         if out.resolve() == self.path.resolve():
             raise ValueError("refusing to overwrite the original image")
         look = {**self._look(look), "removals": True}
-        rgb, steps = self._full_pipeline(look)
-        self.status(f"Writing {out.name}")
-        # Untagged originals are treated as sRGB throughout, so say so in the file.
-        imageio.save(out, rgb, EXPORT_BIT_DEPTH, self.image.icc or imageio._srgb_icc())
+        self._exporting = 0.0
+        try:
+            rgb, steps = self._full_pipeline(look)
+            if not crop_tool.is_noop(crop):
+                rgb = crop_tool.apply(rgb, crop)
+                steps.append({"tool": "crop", "params": {**crop_tool.IDENTITY, **crop}})
+            self.status(f"Writing {out.name}")
+            # Untagged originals are treated as sRGB throughout, so say so in the file.
+            imageio.save(out, rgb, EXPORT_BIT_DEPTH, self.image.icc or imageio._srgb_icc())
+        finally:
+            self._exporting = None
         settings = {"source": str(self.path), "steps": steps}
         sidecar = out.with_name(out.name + ".retouch.json")
         sidecar.write_text(json.dumps(settings, indent=2))
@@ -896,6 +942,12 @@ def serve() -> None:
         else:
             _handle(engine, req, emit)
 
+
+# Export progress: which steps run depends on the photo and its settings, so
+# each step moves the bar this share of the way to EXPORT_WRITING, and writing
+# the file takes it the rest of the way to the end.
+EXPORT_STEP = 0.3
+EXPORT_WRITING = 0.9
 
 BACKGROUND = {"thumbnail"}  # methods that touch no engine state
 

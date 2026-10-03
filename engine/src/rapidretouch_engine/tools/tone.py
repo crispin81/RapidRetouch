@@ -63,20 +63,79 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> np.ndarray:
     return lut[lo] * (1 - f) + lut[hi] * f
 
 
+# Vibrance, like Lightroom's: skin tones (orange-red hues of moderate
+# colour) are protected, and dull colours gain more than already vivid ones.
+SKIN_HUE = (25.0, 70.0)  # Lab hue angle (degrees) of skin, fully protected inside
+SKIN_HUE_FADE = 15.0  # protection fades out over this either side
+SKIN_CHROMA = (4.0, 45.0)  # skin is neither grey nor neon
+SKIN_PROTECT = 0.7  # share of the change skin tones are spared
+SAT_MAX = 0.69  # colour x (1 + this) at full, for dull colours
+VIVID = 60.0  # Lab chroma: colours this vivid gain least
+
+
+# White balance, as a camera does it: a gain on each channel of linear light.
+TEMPERATURE_RANGE = 0.25  # log gain on red (and the opposite on blue) at either end
+TINT_RANGE = 0.15  # log gain off green at either end (+ magenta, - green)
+
+
+def white_balance(rgb: np.ndarray, temperature: float, tint: float) -> np.ndarray:
+    """Temperature (-1 bluer .. +1 warmer, amber) and tint (-1 greener ..
+    +1 more magenta), as channel gains in linear light, with the overall
+    brightness kept."""
+    t = TEMPERATURE_RANGE * float(np.clip(temperature, -1, 1))
+    m = TINT_RANGE * float(np.clip(tint, -1, 1))
+    gains = np.exp(np.array([t, -m, -t], np.float32))
+    gains /= float(gains @ np.array([0.2126, 0.7152, 0.0722], np.float32))  # brightness kept
+    return linear_to_srgb(np.clip(srgb_to_linear(rgb) * gains, 0, 1)).astype(np.float32)
+
+
+def vibrance(rgb: np.ndarray, amount: float) -> np.ndarray:
+    """Vibrance (-1..1): colour across the photo, skin tones protected (see above)."""
+    lab = cv2.cvtColor(np.clip(rgb, 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)
+    a, b = lab[..., 1], lab[..., 2]
+    chroma = np.hypot(a, b)
+    hue = np.degrees(np.arctan2(b, a))
+    lo, hi = SKIN_HUE
+    in_hue = np.clip(1 - np.maximum(lo - hue, hue - hi) / SKIN_HUE_FADE, 0, 1)
+    in_chroma = np.clip((chroma - SKIN_CHROMA[0]) / 2, 0, 1) * np.clip((SKIN_CHROMA[1] + 10 - chroma) / 10, 0, 1)
+    protect = SKIN_PROTECT * in_hue * in_chroma
+    amount = float(np.clip(amount, -1, 1))
+    if amount > 0:
+        gain = 1 + amount * SAT_MAX * (1 - protect) * (1 - 0.6 * np.clip(chroma / VIVID, 0, 1))
+    else:
+        gain = 1 + amount * (1 - protect)
+    lab[..., 1:] *= gain[..., None]
+    return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+
 def is_noop(params: dict | None) -> bool:
     if not params:
         return True
-    return float(params.get("ev", 0)) == 0 and curve_lut(params.get("curve")) is None
+    return (
+        float(params.get("ev", 0)) == 0
+        and float(params.get("temperature", 0)) == 0
+        and float(params.get("tint", 0)) == 0
+        and float(params.get("vibrance", 0)) == 0
+        and curve_lut(params.get("curve")) is None
+    )
 
 
 def apply(rgb: np.ndarray, params: dict | None) -> np.ndarray:
-    """``params``: {"ev": stops, "curve": [[x, y], ...] (lightness 0..1)}."""
+    """``params``: {"temperature": -1..1, "tint": -1..1, "ev": stops,
+    "vibrance": -1..1, "curve": [[x, y], ...] (lightness 0..1)}, applied in
+    that order."""
     if is_noop(params):
         return rgb
     out = np.clip(rgb, 0, 1).astype(np.float32)
+    temperature, tint = float(params.get("temperature", 0)), float(params.get("tint", 0))
+    if temperature or tint:
+        out = white_balance(out, temperature, tint)
     ev = float(params.get("ev", 0))
     if ev:
         out = linear_to_srgb(np.clip(srgb_to_linear(out) * 2.0**ev, 0, 1)).astype(np.float32)
+    vib = float(params.get("vibrance", 0))
+    if vib:
+        out = vibrance(out, vib)
     lut = curve_lut(params.get("curve"))
     if lut is not None:
         lab = cv2.cvtColor(out, cv2.COLOR_RGB2Lab)

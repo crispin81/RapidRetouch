@@ -65,16 +65,20 @@ def classify(rgb: np.ndarray) -> dict:
         np.clip((m["colour"] - COLOUR[0]) / (COLOUR[1] - COLOUR[0]), 0, 1),
     ]
     # The surface fit gets a smaller say: a subject or studio stand reaching the
-    # frame edge also leaves structure there. Edges and colour are the reliable
-    # measures (on 49 studio shots: edges <= 3%, colour spread <= 5.4).
+    # frame edge also leaves structure there. Colour spread is the most
+    # reliable measure, then edges (see the ramps below).
     outdoor = float(np.dot(votes, WEIGHTS))
     mode = "outdoor" if outdoor > 0.5 else "backdrop"
     return {"mode": mode, "confidence": abs(outdoor - 0.5) * 2, **m}
 
 
-# Ramps: the studio side is calibrated on 49 studio shots; the outdoor side is
-# a first guess until outdoor shots are measured.
-WEIGHTS = (0.2, 0.4, 0.4)  # residual, edges, colour
+# Ramps, calibrated on 72 shots. Studio (49 + 4 low-key): edges <= 3%, colour
+# spread <= 5.7. Outdoor (10, fields, woods, bluebells): colour spread >= 10.4
+# — even a soft, dark, nearly edgeless blur of foliage (DSCF7253), which the
+# surface fit and edges alone took for a backdrop. A backdrop is one colour,
+# even a coloured paper one; outdoors mixes several, so colour spread has the
+# biggest say.
+WEIGHTS = (0.2, 0.3, 0.5)  # residual, edges, colour
 RESIDUAL = (3.0, 8.0)  # Lab L
 EDGES = (0.02, 0.10)  # share of border pixels
-COLOUR = (6.0, 14.0)  # Lab a/b spread
+COLOUR = (6.0, 9.0)  # Lab a/b spread

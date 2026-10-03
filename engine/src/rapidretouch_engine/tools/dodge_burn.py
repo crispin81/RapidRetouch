@@ -29,7 +29,7 @@ import numpy as np
 from .colour import linear_to_srgb, srgb_to_linear
 from .eyes import EYES, _inner_feather, _poly_mask
 from .filters import blur, grow_mask, masked_blur
-from .skin import FACE_OVAL, LIPS, face_skin, face_width, forehead_outline
+from .skin import FACE_OVAL, HAIR_SURE, LIPS, _map_into, _smoothstep, _strands, face_skin, face_width, forehead_outline
 
 # The shape of the light, in face widths: finer than DETAIL is texture and
 # pores; broader than FORM is the fall-off of the light across the whole face,
@@ -54,6 +54,13 @@ KEEP_OFF_MARGIN = 0.02  # face widths around the eyes and lips kept clear...
 KEEP_OFF_FADE = 0.03  # ...and faded in over this
 HIGHLIGHT_FADE = (0.35, 0.75)  # linear brightness: dodging fades out toward white
 WORK_FW = 400  # px: the light map is smooth, so it's worked out at this size
+# Hair over the face (a fringe, loose strands) is left as shot. The
+# person-parts model's hair map covers the hair itself, softened over this
+# (face widths) so it leaves no line; single strands are traced at full
+# detail, but only this close (face widths) to that hair, so forehead lines,
+# which look much the same, are still dodged.
+HAIR_SOFT = 0.01
+STRANDS_NEAR_HAIR = 0.08
 
 # Contour zones (MediaPipe face mesh landmarks), widths in face widths.
 DODGE_LINES = [([168, 6, 197, 195, 5], 0.035)]  # nose bridge
@@ -147,8 +154,9 @@ def contour_zones(shape: tuple[int, int], lm: np.ndarray, fw: float) -> tuple[np
     return soft(dodge), soft(burn)
 
 
-def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
-    """Dodge & burn every face. Returns a new rgb."""
+def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params, head_hair: np.ndarray | None = None) -> np.ndarray:
+    """Dodge & burn every face. Returns a new rgb. ``head_hair``: the
+    person-parts model's hair map for the whole photo (any size), kept clear."""
     out = rgb.copy()
     if p.is_noop():
         return out
@@ -175,6 +183,11 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
         )
         skin_w, hair, _ = face_skin(cv2.cvtColor(small, cv2.COLOR_RGB2Lab), slm, outline=(outline - [x0, y0]) * scale)
         W = skin_w * (1 - hair)
+        on_hair = None
+        if head_hair is not None:
+            on_hair = _smoothstep(_map_into(head_hair, (0, 0, 1, 1), (x0, y0, x1, y1), (h, w), sh), *HAIR_SURE)
+            on_hair = np.clip(blur(on_hair, max(0.6, HAIR_SOFT * sfw)) * 1.5, 0, 1)
+            W = W * (1 - on_hair)
         Y = srgb_to_linear(small) @ np.array([0.2126, 0.7152, 0.0722], np.float32)
         shape = light_shape(Y, W, sfw)
         # The change is kept off the eyes and lips, fading smoothly; hair,
@@ -186,6 +199,8 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
         keep_off = np.maximum(keep_off, _poly_mask(sh, slm[LIPS]))
         keep_off = np.clip(blur(grow_mask(keep_off, 2 * round(KEEP_OFF_MARGIN * sfw) + 1), KEEP_OFF_FADE * sfw) * 1.5, 0, 1)
         weight = region * (1 - keep_off)
+        if on_hair is not None:
+            weight = weight * (1 - on_hair)
 
         stops = tone_curve(shape, p)
         if p.contour > 0:
@@ -196,6 +211,12 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params) -> np.ndarray:
         stops = stops * weight
         if s != 1:
             stops = cv2.resize(stops, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LINEAR)
+        if on_hair is not None:
+            near = cv2.resize(blur(on_hair, STRANDS_NEAR_HAIR * sfw), (crop.shape[1], crop.shape[0]))
+            near = np.clip(near * 4, 0, 1)
+            if near.max() > 0:
+                L = cv2.cvtColor(crop.astype(np.float32), cv2.COLOR_RGB2Lab)[..., 0]
+                stops = stops * (1 - _strands(L, fw) * near)
         lin = srgb_to_linear(crop)
         # Dodging near-white skin only blows it out. Judged over an area, not
         # per pixel: per pixel, bright and dark specks were dodged differently,
