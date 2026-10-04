@@ -7,9 +7,7 @@ credits. Built for studio and outdoor portraits, from 24 MP up to 100 MP medium 
 Part of a family of apps by Chris Cork Photography, alongside RapidCulling and
 RapidTimelapse.
 
-> Status: in development towards the first public release (1.0.0, AppImage first).
-> The repository is private until then. AGPL-3.0 requires the source to be public once
-> the app is distributed.
+> **Actively developed: expect frequent updates.**
 
 ## What it does
 
