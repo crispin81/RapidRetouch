@@ -107,6 +107,35 @@ fn size_mib(line: &str) -> Option<f64> {
     })
 }
 
+/// Share of the setup's progress bar for installing the engine; the rest is
+/// for downloading the AI models and loading everything once (see prepare_engine).
+const ENGINE_SHARE: f64 = 0.75;
+
+/// After installing: download the default AI models and load every library
+/// once (`rapidretouch_engine.cli prepare`), so nothing is downloaded in the
+/// middle of editing and a Mac's first-load security scan happens now. Not
+/// fatal: anything missed is done when first needed, as before.
+fn prepare_engine(app: &AppHandle, env: &Path) {
+    let child = quiet(&mut Command::new(env_python(env)))
+        .args(["-m", "rapidretouch_engine.cli", "prepare"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return };
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            let text = msg.get("message").and_then(Value::as_str).unwrap_or("");
+            let f = msg.get("fraction").and_then(Value::as_f64).unwrap_or(0.0);
+            if text != "Ready" {
+                emit_setup(app, text, Some(ENGINE_SHARE + (1.0 - ENGINE_SHARE) * f.min(0.99)));
+            }
+        }
+    }
+    let _ = child.wait();
+}
+
 fn downloading(done: f64, total: f64) -> String {
     format!("Downloading the AI engine… {:.0} of {:.0} MB", done, total)
 }
@@ -144,7 +173,8 @@ fn prepare_bundled(app: &AppHandle) -> Result<Command, String> {
             Some(0.0),
         );
         let mut child = quiet(&mut Command::new(&uv))
-            .args(["sync", "--no-config", "--frozen", "--no-editable", "--no-default-groups"])
+            // --compile-bytecode: Python's own compiling done now, not at each first import.
+            .args(["sync", "--no-config", "--frozen", "--no-editable", "--no-default-groups", "--compile-bytecode"])
             .args(["--group", backend, "--python", "3.12", "--project"])
             .arg(&source)
             .env("UV_PROJECT_ENVIRONMENT", &env)
@@ -172,13 +202,13 @@ fn prepare_bundled(app: &AppHandle) -> Result<Command, String> {
                     let name = rest.split(" (").next().unwrap_or(rest).to_string();
                     total += mib;
                     sizes.insert(name.clone(), mib);
-                    emit_setup(app, &downloading(done, total), Some(done / total.max(1.0)));
+                    emit_setup(app, &downloading(done, total), Some(ENGINE_SHARE * done / total.max(1.0)));
                 }
             } else if let Some(name) = text.strip_prefix("Downloaded ") {
                 done += sizes.get(name).copied().unwrap_or(0.0);
-                emit_setup(app, &downloading(done, total), Some(done / total.max(1.0)));
+                emit_setup(app, &downloading(done, total), Some(ENGINE_SHARE * done / total.max(1.0)));
             } else if text.starts_with("Prepared") || text.starts_with("Installed") {
-                emit_setup(app, "Installing the AI engine…", Some(0.97));
+                emit_setup(app, "Installing the AI engine…", Some(ENGINE_SHARE));
             }
         }
         let status = child.wait().map_err(|e| e.to_string())?;
@@ -187,6 +217,7 @@ fn prepare_bundled(app: &AppHandle) -> Result<Command, String> {
                 "Setting up the AI engine didn't finish. Check the internet connection and open RapidRetouch again. ({last})"
             ));
         }
+        prepare_engine(app, &env);
         std::fs::write(&marker, &stamp).map_err(|e| e.to_string())?;
         emit_setup(app, "Ready", Some(1.0));
     }

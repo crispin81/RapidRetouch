@@ -121,6 +121,23 @@ def fetch_url(manifest: "Manifest", status=lambda msg: None) -> Path:
     return dest
 
 
+def prefetch(manifest: "Manifest", status=lambda msg: None) -> None:
+    """Download a model's files now (first-launch setup) rather than the first
+    time a tool needs it. Hugging Face models go to its own cache, where
+    loading them later finds them."""
+    kind = manifest.source.get("kind")
+    if kind == "url":
+        fetch_url(manifest, status)
+    elif kind == "huggingface":
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            manifest.source["repo"],
+            revision=manifest.source["revision"],
+            allow_patterns=["*.py", "*.json", "*.safetensors", "*.txt"],
+        )
+
+
 class Registry:
     def __init__(self, manifest_dir: Path = MANIFEST_DIR):
         self.manifests = {

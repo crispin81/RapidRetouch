@@ -575,7 +575,7 @@ function Panel({
 
 export default function App() {
   const [engineReady, setEngineReady] = useState(false);
-  const [status, setStatus] = useState("Starting engine…");
+  const [status, setStatus] = useState("Starting the AI engine…");
   const [error, setError] = useState<string | null>(null);
   const [image, setImage] = useState<(OpenResult & { path: string }) | null>(null);
   const [result, setResult] = useState<string | null>(null);
@@ -2741,6 +2741,11 @@ export default function App() {
           {error ? (
             <span className="statusbar__error" onClick={() => setError(null)} title="Click to dismiss">
               {error}
+            </span>
+          ) : !engineReady && !setup ? (
+            <span className="app-footer__starting">
+              Starting the AI engine…
+              <span className="app-footer__busy" />
             </span>
           ) : countdown !== null ? (
             <span>

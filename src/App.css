@@ -1568,3 +1568,30 @@ button.primary {
   color: #ff7a6b;
   line-height: 1.45;
 }
+
+/* Footer while the engine starts: a small moving bar beside the words. */
+.app-footer__starting {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-footer__busy {
+  position: relative;
+  display: inline-block;
+  width: 60px;
+  height: 3px;
+  border-radius: 2px;
+  background: #2a2b33;
+  overflow: hidden;
+}
+
+.app-footer__busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  border-radius: 2px;
+  background: #ffcc33;
+  animation: setup-busy 1.2s ease-in-out infinite;
+}
