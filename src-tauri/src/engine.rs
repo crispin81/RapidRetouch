@@ -158,7 +158,11 @@ fn prepare_bundled(app: &AppHandle) -> Result<Command, String> {
     let env = data.join("engine");
     let backend = backend();
     let version = app.package_info().version.to_string();
-    let stamp = format!("{version} {backend}");
+    // The exact build as well as the version: a rebuild of the same version
+    // (or a later one) refreshes the engine code installed from it. Quick: the
+    // large downloads are cached.
+    let build = option_env!("GITHUB_SHA").unwrap_or("local");
+    let stamp = format!("{version} {backend} {build}");
     let marker = env.join("rapidretouch-setup.txt");
 
     if std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str()) {
@@ -175,6 +179,9 @@ fn prepare_bundled(app: &AppHandle) -> Result<Command, String> {
         let mut child = quiet(&mut Command::new(&uv))
             // --compile-bytecode: Python's own compiling done now, not at each first import.
             .args(["sync", "--no-config", "--frozen", "--no-editable", "--no-default-groups", "--compile-bytecode"])
+            // The engine itself is always reinstalled (a second): its version
+            // number doesn't change between builds, so uv would keep the old code.
+            .args(["--reinstall-package", "rapidretouch-engine"])
             .args(["--group", backend, "--python", "3.12", "--project"])
             .arg(&source)
             .env("UV_PROJECT_ENVIRONMENT", &env)

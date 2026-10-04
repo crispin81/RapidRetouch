@@ -288,9 +288,10 @@ class Engine:
         )
         if self.alpha is not None and self.mask_model == manifest.id:
             return
-        self.status(f"Loading {manifest.name} (first run downloads it)")
+        self.status(f"Loading {manifest.name}…")
         model = self.registry.get(manifest.id)
-        self.status("Finding the subject")
+        on_cpu = getattr(model, "device", "") == "cpu"
+        self.status("Finding the subject (slower without a graphics card)…" if on_cpu else "Finding the subject…")
         self.alpha = model.predict(self.image.rgb)
         self.alpha_preview_raw = _proxy(self.alpha, PREVIEW_EDGE)
         self.alpha_preview = mask_edit.apply(self.alpha_preview_raw, self.mask_edits)
@@ -520,7 +521,7 @@ class Engine:
         0..1 on a copy up to 1024 px, found once per photo from the original."""
         if self._parts is None:
             manifest = self.registry.default_for("person_parts")
-            self.status(f"Loading {manifest.name} (first run downloads it)")
+            self.status(f"Loading {manifest.name}…")
             model = self.registry.get(manifest.id)
             self.status("Telling skin from hair and clothes")
             self._parts = model.predict(self.image.rgb)
@@ -550,7 +551,7 @@ class Engine:
     def _ensure_faces(self) -> list[np.ndarray]:
         if self.faces is None:
             manifest = self.registry.default_for("face_landmarks")
-            self.status(f"Loading {manifest.name} (first run downloads it)")
+            self.status(f"Loading {manifest.name}…")
             model = self.registry.get(manifest.id)
             self.status("Finding faces")
             self.faces = model.predict(self.image.rgb)
@@ -580,7 +581,7 @@ class Engine:
 
     def _inpaint_model(self):
         manifest = self.registry.default_for("inpaint")
-        self.status(f"Loading {manifest.name} (first run downloads it)")
+        self.status(f"Loading {manifest.name}…")
         return self.registry.get(manifest.id)
 
     def _edited_preview(self) -> np.ndarray:
