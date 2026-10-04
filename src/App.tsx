@@ -1336,11 +1336,12 @@ export default function App() {
     }
   };
 
-  // Thumbnails, one at a time so they don't hold up the photo being edited.
+  // Thumbnails, one at a time so they don't hold up the photo being edited,
+  // and none while it's being rendered: on a laptop they took its CPU.
   const loadingThumb = useRef(false);
   useEffect(() => {
     const next = strip.find((i) => !i.thumb);
-    if (!next || loadingThumb.current || !engineReady) return;
+    if (!next || loadingThumb.current || !engineReady || busy) return;
     loadingThumb.current = true;
     call<{ image: string; scene: "backdrop" | "outdoor" }>("thumbnail", { path: next.path })
       .then((r) => {
@@ -1356,7 +1357,7 @@ export default function App() {
       .finally(() => {
         loadingThumb.current = false;
       });
-  }, [strip, engineReady]);
+  }, [strip, engineReady, busy]);
 
   const removeFromStrip = async (path: string) => {
     const idx = strip.findIndex((i) => i.path === path);

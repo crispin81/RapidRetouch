@@ -429,3 +429,9 @@ already), and while Strength and Brightness are both 0 the backdrop step isn't s
 (`backdropLook` in App.tsx), so BiRefNet only runs once it's wanted. That's the slow part without a GPU:
 ~8 s at 1024 px on the CPU (`CPU_INPUT_SIZE`), against 30 s+ and 12 GB of memory at 2048. Crease size,
 Grain and Edge protection keep their values, since they're settings for how smoothing works.
+
+**Memory and laptops (2026-10-04):** the engine's caches are held to a share of *total* memory
+(`system.total_memory()`): preview stages 4%, face crops at full resolution 6%, always at least two entries
+each, plus a count cap. Zoomed areas kept: 4, or 2 under 32 GB. Total rather than available memory, so
+behaviour is predictable whatever else is open. A 16 GB laptop gets ~0.6 GB + ~1 GB. Film-strip thumbnails
+pause while a render is running (they took a laptop's CPU from the photo being edited).

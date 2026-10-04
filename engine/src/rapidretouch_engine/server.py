@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import imageio, presets
+from . import imageio, presets, system
 from .registry import LicenceNotAccepted, Registry
 from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, scene, tone
 from .tools import crop as crop_tool
@@ -45,10 +45,16 @@ WRITE_SETTINGS_FILE = False
 # stages are kept (each ~200 MB at 100 MP: the four face tools' results for
 # two looks, so going back and forth between sliders finds them).
 ZOOM_SPARE = 0.25
-ZOOM_TILES = 4
 FACE_WINDOW_MARGIN = 0.5  # face widths around the face outline: every face tool works within it
 FACE_WINDOW_CACHE_SIZE = 10
 STAGE_CACHE_SIZE = 12  # preview stages kept: the current look's, plus a before view's
+# Those caches are also held to a share of the computer's memory, so a 16 GB
+# laptop with a 100 MP photo doesn't swap (at least two entries are always
+# kept, for going back and forth), and fewer zoomed areas are kept there.
+MEMORY = system.total_memory()
+STAGE_CACHE_BUDGET = int(0.04 * MEMORY)
+FACE_WINDOW_CACHE_BUDGET = int(0.06 * MEMORY)
+ZOOM_TILES = 4 if MEMORY >= 32 << 30 else 2
 METHODS = {
     "ping",
     "models",
@@ -706,7 +712,9 @@ class Engine:
         rgb[y0:y1, x0:x1] = crop
         return rgb
 
-    def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE) -> np.ndarray:
+    def _staged(
+        self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE, budget=None
+    ) -> np.ndarray:
         """Run ``stages`` on ``rgb`` (a callable, only called if needed),
         reusing the output of every stage whose settings, and whose earlier
         stages' settings, are unchanged. Moving one tool's slider then reruns
@@ -732,7 +740,10 @@ class Engine:
 
         def keep(k, value):
             cache[k] = value
-            while len(cache) > size:
+            # Oldest first, down to ``size`` entries and the memory budget.
+            while len(cache) > size or (
+                len(cache) > 2 and sum(v.nbytes for v in cache.values()) > (budget or STAGE_CACHE_BUDGET)
+            ):
                 cache.pop(next(iter(cache)))
 
         start, img = 0, None
@@ -1039,7 +1050,7 @@ class Engine:
                 self.status("Retouching the face at full resolution")
                 base_key = json.dumps([backdrop, removal_key, mask_key, face], sort_keys=True)
                 faced = self._staged(lambda: np.array(smoothed(face), np.float32), base_key, stages,
-                                     self._face_window_cache, FACE_WINDOW_CACHE_SIZE)
+                                     self._face_window_cache, FACE_WINDOW_CACHE_SIZE, FACE_WINDOW_CACHE_BUDGET)
                 out[iy0 - y0 : iy1 - y0, ix0 - x0 : ix1 - x0] = faced[iy0 - face[1] : iy1 - face[1], ix0 - face[0] : ix1 - face[0]]
         return out
 
