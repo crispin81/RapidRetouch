@@ -9,6 +9,8 @@ RapidTimelapse.
 
 > **Actively developed: expect frequent updates.**
 
+▶ **New to RapidRetouch? [Watch the tutorial video](https://youtu.be/dvJXRj3YTuc).**
+
 ## What it does
 
 Every adjustment is a slider (or a brush where a slider can't know what you mean),
