@@ -365,6 +365,7 @@ button.primary {
 .modal {
   position: fixed;
   inset: 0;
+  z-index: 100; /* above the sticky sidebar bar, banners and floating tool bars */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -434,13 +435,6 @@ button.primary {
   color: #6c6d78;
 }
 
-.titlebar__beta {
-  color: #ff9800;
-  font-weight: 600;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
 
 .titlebar__controls {
   display: flex;
@@ -1071,20 +1065,71 @@ button.primary {
 /* About */
 .about {
   position: relative;
-  width: 560px;
-  max-height: 85vh;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: min(1040px, 92vw);
+  height: min(720px, 88vh);
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Left half: Chris's photo, edge to edge, with the watermark over it. */
+.about__photo {
+  position: relative;
+  min-height: 0;
+  background: #14151a;
+}
+
+.about__photo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 30%; /* keep the face in view when the box is narrower */
+}
+
+.about__photo-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  border-right: 1px dashed #4a4b56;
+  color: #6d6e7a;
+  font-size: 13px;
+}
+
+.about__watermark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 22px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 300;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.82);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Right half: the text, scrolling on its own if it's taller than the box. */
+.about__text {
+  min-height: 0;
   overflow-y: auto;
+  padding: 18px 26px 16px;
 }
 
 .about h3 {
-  margin: 18px 0 6px;
+  margin: 12px 0 4px;
   font-size: 13px;
   color: #ffcc33;
 }
 
 .about p {
-  margin: 0 0 8px;
-  line-height: 1.45;
+  margin: 0 0 6px;
+  line-height: 1.38;
 }
 
 .about a {
@@ -1100,6 +1145,7 @@ button.primary {
   position: absolute;
   top: 10px;
   right: 10px;
+  z-index: 1;
   padding: 4px;
 }
 
@@ -1110,25 +1156,8 @@ button.primary {
 }
 
 .about__head h2 {
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   font-size: 18px;
-}
-
-.about__photo {
-  flex: none;
-  width: 120px;
-  height: 120px;
-  border-radius: 50%;
-  object-fit: cover;
-}
-
-.about__photo--empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed #4a4b56;
-  color: #6d6e7a;
-  font-size: 12px;
 }
 
 .about__links {
@@ -1148,7 +1177,8 @@ button.primary {
 }
 
 .about__models li {
-  margin-bottom: 6px;
+  margin-bottom: 3px;
+  line-height: 1.3;
 }
 
 .about__small {
@@ -1157,8 +1187,8 @@ button.primary {
 }
 
 .about__coffee {
-  margin-top: 18px;
-  padding: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
   border-radius: 8px;
   background: #23242c;
 }
@@ -1411,4 +1441,130 @@ button.primary {
 .opacity-group__control input[type="range"]:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.export__size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export__px {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #8d8e99;
+  font-size: 12px;
+}
+
+.export__px input {
+  width: 72px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid #3a3b45;
+  background: #14151a;
+  color: #e6e6eb;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Switching photo: a thin bar while it's prepared (see `prep` in App.tsx). */
+.viewer__progress,
+.filmstrip__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(58, 59, 69, 0.8);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.viewer__progress {
+  top: 0;
+  z-index: 7;
+}
+
+.filmstrip__progress {
+  bottom: 0;
+}
+
+.viewer__progress > div,
+.filmstrip__progress > div {
+  height: 100%;
+  background: #ffcc33;
+  transition: width 0.3s ease;
+}
+
+/* First-launch setup of the AI engine: over everything, nothing to click. */
+.setup {
+  position: fixed;
+  inset: 28px 0 0 0; /* below the title bar, so the window can still be moved or closed */
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #101114;
+}
+
+.setup__box {
+  width: min(460px, 86vw);
+  text-align: center;
+}
+
+.setup__icon {
+  width: 96px;
+  height: 96px;
+}
+
+.setup__box h1 {
+  margin: 10px 0 18px;
+  font-size: 22px;
+  font-weight: 400;
+}
+
+.setup__message {
+  min-height: 2.8em;
+  margin: 0 0 12px;
+  color: #e6e6eb;
+  line-height: 1.4;
+}
+
+.setup__bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #2a2b33;
+  overflow: hidden;
+}
+
+.setup__bar > div {
+  height: 100%;
+  background: #ffcc33;
+  transition: width 0.4s ease;
+}
+
+.setup__bar--busy {
+  width: 30%;
+  animation: setup-busy 1.4s ease-in-out infinite;
+}
+
+@keyframes setup-busy {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.setup__note {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: #8d8e99;
+  line-height: 1.45;
+}
+
+.setup__error {
+  color: #ff7a6b;
+  line-height: 1.45;
 }

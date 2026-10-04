@@ -1,6 +1,11 @@
 import { Check, FolderOpen, X } from "lucide-react";
 
 export type ExportFormat = "tiff" | "jpeg";
+/** JPEG size: full resolution, or scaled down to a long edge in pixels. */
+export interface ExportSize {
+  mode: "full" | "long";
+  px: number;
+}
 
 export interface ExportRow {
   path: string;
@@ -11,6 +16,8 @@ export interface ExportRow {
 }
 
 const name = (path: string) => path.split("/").pop() ?? path;
+export const MIN_LONG_EDGE = 100;
+export const MAX_LONG_EDGE = 20000;
 
 /**
  * Export: the photos selected in the film strip (or just the one being
@@ -20,10 +27,12 @@ const name = (path: string) => path.split("/").pop() ?? path;
 export default function ExportDialog({
   rows,
   format,
+  size,
   folder,
   running,
   cancelling,
   onFormat,
+  onSize,
   onChooseFolder,
   onSameFolder,
   onStart,
@@ -32,10 +41,12 @@ export default function ExportDialog({
 }: {
   rows: ExportRow[];
   format: ExportFormat;
+  size: ExportSize;
   folder: string | null; // null: next to each original
   running: boolean;
   cancelling: boolean;
   onFormat: (f: ExportFormat) => void;
+  onSize: (s: ExportSize) => void;
   onChooseFolder: () => void;
   onSameFolder: () => void;
   onStart: () => void;
@@ -48,6 +59,7 @@ export default function ExportDialog({
   const failed = rows.filter((r) => r.state === "failed").length;
   const total = rows.reduce((t, r) => t + (r.state === "done" ? 1 : r.fraction), 0) / rows.length;
   const count = `${rows.length} photo${rows.length === 1 ? "" : "s"}`;
+  const sizeOk = format !== "jpeg" || size.mode === "full" || (size.px >= MIN_LONG_EDGE && size.px <= MAX_LONG_EDGE);
 
   return (
     <div className="modal" onClick={running ? undefined : onClose}>
@@ -67,6 +79,41 @@ export default function ExportDialog({
                 </button>
               </div>
             </div>
+            {format === "jpeg" && (
+              <div className="export__option">
+                <span>Size</span>
+                <div className="export__size">
+                  <div className="tabs">
+                    <button
+                      className={size.mode === "full" ? "active" : ""}
+                      onClick={() => onSize({ ...size, mode: "full" })}
+                    >
+                      Full size
+                    </button>
+                    <button
+                      className={size.mode === "long" ? "active" : ""}
+                      onClick={() => onSize({ ...size, mode: "long" })}
+                      title="Scale down so the longer side is this many pixels; the other side follows in proportion"
+                    >
+                      Long edge
+                    </button>
+                  </div>
+                  {size.mode === "long" && (
+                    <label className="export__px">
+                      <input
+                        type="number"
+                        min={MIN_LONG_EDGE}
+                        max={MAX_LONG_EDGE}
+                        step={1}
+                        value={size.px}
+                        onChange={(e) => onSize({ ...size, px: Math.round(Number(e.target.value)) || 0 })}
+                      />
+                      px
+                    </label>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="export__option">
               <span>Save to</span>
               <div className="tabs">
@@ -81,7 +128,8 @@ export default function ExportDialog({
             {folder && <div className="export__folder" title={folder}>{folder}</div>}
             <p className="export__note">
               Saved as <code>name_retouched.{format === "tiff" ? "tif" : "jpg"}</code>; an earlier export with
-              the same name is replaced. Each photo is exported with its own settings, crop and brush work.
+              the same name is replaced.
+              {format === "jpeg" && size.mode === "long" && " Photos already smaller than the long edge stay at full size."} Each photo is exported with its own settings, crop and brush work.
             </p>
           </div>
         )}
@@ -135,7 +183,7 @@ export default function ExportDialog({
           {!started && (
             <>
               <button onClick={onClose}>Cancel</button>
-              <button className="primary" onClick={onStart}>
+              <button className="primary" onClick={onStart} disabled={!sizeOk}>
                 Export {count}
               </button>
             </>

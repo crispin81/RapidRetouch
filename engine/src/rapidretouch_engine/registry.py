@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import os
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,8 +24,15 @@ MANIFEST_DIR = Path(__file__).parent / "manifests"
 
 
 def data_dir() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
-    path = Path(base) / "rapidretouch"
+    """Where downloaded models live: the platform's per-user app data folder
+    (%LOCALAPPDATA%\\RapidRetouch on Windows, ~/Library/Application
+    Support/RapidRetouch on a Mac, $XDG_DATA_HOME/rapidretouch on Linux)."""
+    if sys.platform == "win32":
+        path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "RapidRetouch"
+    elif sys.platform == "darwin":
+        path = Path.home() / "Library" / "Application Support" / "RapidRetouch"
+    else:
+        path = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "rapidretouch"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

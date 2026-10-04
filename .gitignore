@@ -28,3 +28,6 @@ engine/.venv
 __pycache__
 .pytest_cache
 .scratch/
+
+# uv for release builds, fetched by scripts/fetch-uv.sh
+src-tauri/binaries/

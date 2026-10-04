@@ -13,6 +13,8 @@ interface Props {
   active: string | null;
   selected: Set<string>;
   canPaste: boolean;
+  /** The photo being prepared after switching to it, and how far along. */
+  progress?: { path: string; fraction: number } | null;
   onActivate: (path: string) => void;
   onSelect: (selected: Set<string>) => void;
   onRemove: (path: string) => void;
@@ -32,6 +34,7 @@ export default function FilmStrip({
   active,
   selected,
   canPaste,
+  progress,
   onActivate,
   onSelect,
   onRemove,
@@ -72,7 +75,7 @@ export default function FilmStrip({
           {items.length} photo{items.length === 1 ? "" : "s"}
           {selected.size > 1 ? ` · ${selected.size} selected` : ""}
         </span>
-        <button onClick={onCopy} disabled={!active} title="Copy this photo's slider settings (Backdrop and Eyes)">
+        <button onClick={onCopy} disabled={!active} title="Copy this photo's slider settings, mode and crop">
           <Copy size={14} /> Copy settings
         </button>
         <button
@@ -107,6 +110,11 @@ export default function FilmStrip({
             )}
             <span className="filmstrip__name">{fileName(item.path)}</span>
             {item.edited && <span className="filmstrip__edited" title="Settings changed" />}
+            {progress?.path === item.path && (
+              <div className="filmstrip__progress" title="Preparing this photo">
+                <div style={{ width: `${progress.fraction * 100}%` }} />
+              </div>
+            )}
             <button
               className="filmstrip__remove"
               title="Take out of the strip (the file isn't touched)"

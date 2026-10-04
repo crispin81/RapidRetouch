@@ -33,7 +33,12 @@ from .tools import mouth as mouth_tool
 from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
-EXPORT_BIT_DEPTH = 16  # every export is a 16-bit TIFF
+EXPORT_BIT_DEPTH = 16  # TIFF exports are 16-bit (JPEGs are 8-bit by nature)
+# The settings record (<export>.retouch.json: every step, its settings, the
+# edits and the AI models used) is off for now: it cluttered delivery folders
+# (Chris, 2026-10-04). Planned instead: the same record in the image's own
+# metadata (XMP in JPEGs, the description tag in TIFFs).
+WRITE_SETTINGS_FILE = False
 # Zooming in (see render_region): how much more than the view is rendered on
 # each side (as a share of its size), how many such areas are kept for panning
 # back, and the face tools' crop at full resolution and how many of its
@@ -143,7 +148,10 @@ class Engine:
         self._zoom_tiles: list[tuple] = []  # (key, area, untoned pixels), see render_region
         self._face_window_cache: dict[str, np.ndarray] = {}  # face tools at full resolution, see _zoom_area
         self._iris_scale: tuple | None = None  # (colours,) for the open photo, see iris_scale
-        self._exporting: float | None = None  # progress of the export under way, 0..1
+        self._exporting: float | None = None
+        # Export files written in the background (see export), one at a time.
+        self._writer = ThreadPoolExecutor(max_workers=1)
+        self._writing = None  # progress of the export under way, 0..1
 
     def status(self, message: str) -> None:
         self.emit({"event": "status", "message": message})
@@ -663,13 +671,34 @@ class Engine:
 
     def _face_tools(self, rgb: np.ndarray, look: dict, people, steps: list[dict] | None = None) -> np.ndarray:
         """Every face and body tool this look uses, in order, uncached (the
-        full-resolution pipeline)."""
-        for _name, settings, run in self._face_stages(look, people):
+        full-resolution pipeline). Without Neck & Body, the face tools run on
+        a crop around the faces (as zooming in does): at 100 MP every tool
+        otherwise copied the whole photo. Returns a new image."""
+        body = any(
+            not skin_tool.RegionParams.from_dict((look["skin"] or {}).get(r)).is_noop() for r in ("neck", "body")
+        )
+        face = None if body else self._face_window()
+        if face is None:
+            for _name, settings, run in self._face_stages(look, people):
+                op = settings.get("opacity", 1.0)
+                out = run(rgb, steps)
+                if op < 1 and steps:
+                    steps[-1]["opacity"] = op
+                rgb = _blend(rgb, out, op)
+            return rgb
+        x0, y0, x1, y1 = face
+        stages = self._face_stages(look, None, frame=(face, rgb.shape[:2]))
+        if not stages:
+            return rgb
+        crop = np.array(rgb[y0:y1, x0:x1], np.float32)
+        for _name, settings, run in stages:
             op = settings.get("opacity", 1.0)
-            out = run(rgb, steps)
+            out = run(crop, steps)
             if op < 1 and steps:
                 steps[-1]["opacity"] = op
-            rgb = _blend(rgb, out, op)
+            crop = _blend(crop, out, op)
+        rgb = rgb.copy()
+        rgb[y0:y1, x0:x1] = crop
         return rgb
 
     def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE) -> np.ndarray:
@@ -839,11 +868,20 @@ class Engine:
         crop = tone.apply(crop, look["tone"])
         return {"image": _jpeg_b64(crop), "region": [x0, y0, x1, y1]}
 
-    def export(self, path: str, crop: dict | None = None, **look) -> dict:
+    def export(
+        self, path: str, crop: dict | None = None, long_edge: int | None = None, background: bool = False, **look
+    ) -> dict:
         """Export the retouched photo at full resolution, colour profile
         embedded: a 16-bit TIFF (lossless, the highest quality for further
         editing) or a maximum-quality JPEG, by the file's extension. Any other
-        name gets ".tif"."""
+        name gets ".tif". ``long_edge``: scale down (after the crop) so the
+        longer side is this many pixels, the other in proportion; never up.
+
+        ``background``: write the file on a thread of its own and return as
+        soon as the image is ready, so a batch retouches the next photo while
+        this one is written (1-2 s at 100 MP); a "written" event follows with
+        the path (and an error, if writing failed). One file is written at a
+        time, which bounds the memory held."""
         self._require_image()
         out = Path(path)
         if out.suffix.lower() not in (".tif", ".tiff", ".jpg", ".jpeg"):
@@ -857,15 +895,39 @@ class Engine:
             if not crop_tool.is_noop(crop):
                 rgb = crop_tool.apply(rgb, crop)
                 steps.append({"tool": "crop", "params": {**crop_tool.IDENTITY, **crop}})
+            if long_edge:
+                h, w = rgb.shape[:2]
+                scale = int(long_edge) / max(h, w)
+                if scale < 1:
+                    size = (max(1, round(w * scale)), max(1, round(h * scale)))
+                    rgb = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
+                    steps.append({"tool": "resize", "long_edge": int(long_edge), "size": list(size)})
             self.status(f"Writing {out.name}")
             # Untagged originals are treated as sRGB throughout, so say so in the file.
-            imageio.save(out, rgb, EXPORT_BIT_DEPTH, self.image.icc or imageio._srgb_icc())
+            icc = self.image.icc or imageio._srgb_icc()
+            if background:
+                if self._writing is not None:
+                    self._writing.result()  # the previous file first: one at a time
+
+                def write(out=out, rgb=rgb, icc=icc):
+                    try:
+                        imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc)
+                        self.emit({"event": "written", "path": str(out)})
+                    except Exception as e:  # reported to the app, not lost on this thread
+                        traceback.print_exc()
+                        self.emit({"event": "written", "path": str(out), "error": str(e)})
+
+                self._writing = self._writer.submit(write)
+            else:
+                imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc)
         finally:
             self._exporting = None
+        if not WRITE_SETTINGS_FILE:
+            return {"path": str(out), "settings": None, "pending": background}
         settings = {"source": str(self.path), "steps": steps}
         sidecar = out.with_name(out.name + ".retouch.json")
         sidecar.write_text(json.dumps(settings, indent=2))
-        return {"path": str(out), "settings": str(sidecar)}
+        return {"path": str(out), "settings": str(sidecar), "pending": background}
 
     def _cached(self, stage: str, key, compute):
         hit = self._full.get(stage)

@@ -15,8 +15,11 @@ Last updated: 2026-10-04.
   behind a licence-acceptance prompt (the registry supports this).
 - **Never commit model weights.** Download on first use from the official source, verified
   by sha256 (`source.kind: url`) or a pinned Hugging Face revision.
-- **Record provenance.** Every export's `.retouch.json` lists each step, its settings,
-  area/mask edits and the model versions used.
+- **Record provenance.** Each export can have a record of every step, its settings, the
+  area/mask edits and the model versions used. The `<export>.retouch.json` sidecar that held
+  it is **switched off** (`WRITE_SETTINGS_FILE`, 2026-10-04): it cluttered delivery folders.
+  Planned instead: the same record in the image's own metadata (XMP in JPEGs, the
+  description tag in TIFFs).
 - **Skin retouching stays local, always.** Optional online backends (fal.ai / Replicate,
   FLUX Kontext) were planned in the brief only for big generative fills, sending masked
   crops, never whole photos. None have been built.
@@ -347,7 +350,31 @@ GPU matters.
   - Turn off `prerelease: true` in release workflows.
   - RapidRetouch goes 0.1.0 → **1.0.0** at its first public release. RapidCulling and
     RapidTimelapse go to 1.0.1 at their next release.
-- **First release: AppImage** (then .deb/.rpm like RapidCulling).
+- **How the release is built (done 2026-10-04):** push a tag `v1.0.0` → `.github/workflows/release.yml`
+  builds Windows (.exe/.msi), Mac (Apple Silicon .dmg; PyTorch has no Intel Mac builds) and Linux
+  (AppImage/.deb/.rpm) into a draft release.
+  - The installer carries `uv` (fetched by `scripts/fetch-uv.sh`, pinned 0.12.19) and the
+    engine's source (`src-tauri/tauri.release.conf.json`: externalBin + resources; dev builds
+    don't use it).
+  - **First launch** (`src-tauri/src/engine.rs`): `uv sync --frozen --no-editable
+    --no-default-groups --group cuda|cpu` into the app's local data folder (`engine/`,
+    `python/`, `download-cache/`). `cuda` if `nvidia-smi -L` finds a GPU, else `cpu`; Macs use
+    PyPI's torch. A `SetupScreen` shows progress from uv's "Downloading X (size)" lines. A
+    marker file (`<version> <backend>`) means it reruns, quickly from the cache, only when the
+    app version changes.
+  - Then the engine runs as `<env>/bin/python -m rapidretouch_engine.cli serve`, with no
+    console window on Windows.
+  - Helpers start with PYTHONHOME/PYTHONPATH/LD_LIBRARY_PATH removed: the AppImage launcher's
+    values made the engine's Python fail with "No module named 'encodings'".
+  - Sizes: a ~115 MB AppImage. The NVIDIA engine is ~3 GB to download and 6.9 GB installed;
+    CPU is ~1 GB.
+  - Tested locally: a fresh AppImage first launch → setup → engine on CUDA → a full retouch.
+  - The engine's models/presets live in each platform's own folders (`registry.data_dir`,
+    `presets.folder`).
+  - Windows installer artwork: `src-tauri/icons/installer/*.bmp`.
+  - Icon: `src-tauri/icons/source/rapidretouch-icon.svg` (RapidCulling's design, "Rr" in Noto
+    Serif Bold Italic outlines).
+- **Earlier plan: AppImage first** (then .deb/.rpm like RapidCulling).
   - Copy RapidCulling's patched `linuxdeploy-plugin-gtk.sh` (GDK_BACKEND=wayland,x11)
     and release workflow. There's no `.github/` here yet.
   - Packaging direction: ONNX Runtime instead of PyTorch, a CPU baseline in the

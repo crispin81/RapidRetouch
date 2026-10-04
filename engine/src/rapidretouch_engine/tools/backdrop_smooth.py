@@ -366,28 +366,43 @@ def prepare(rgb: np.ndarray, alpha: np.ndarray, p: Params, light: Lighting | Non
     # Full-resolution fields.
     edge_px = p.edge_protect / 100 * max(H, W)
     w_full = backdrop_weight(alpha, edge_px)
-    w_soft = cv2.GaussianBlur(w_full, (0, 0), max(1.0, edge_px / 2))
-    # A Gaussian never quite reaches zero; its tail times the large subject-to-
-    # backdrop difference would tint the subject, so cap by the backdrop share.
-    w_soft = np.minimum(w_soft, 1.0 - alpha)[..., None]
-    edge_share = (1.0 - w_soft) * (1.0 - alpha)[..., None]
-
-    base = w_soft * (up(light.lf) - rgb) + edge_share * up(light.delta_ext)
-    even = w_soft * up(light.to_even) + edge_share * up(light.delta_even)
-
-    # Original grain survives with weight (1 - w_soft). Two independent noises
-    # blended linearly lose up to ~30% of their strength, which would show as a
-    # smooth ring around the subject, so add synthetic grain in quadrature instead.
-    grain = None
+    soft = cv2.GaussianBlur(w_full, (0, 0), max(1.0, edge_px / 2))
+    lf, delta_ext = up(light.lf), up(light.delta_ext)
+    to_even, delta_even = up(light.to_even), up(light.delta_even)
+    noise, chol = None, None
     if light.grain is not None:
         chol, sigma = light.grain
-        # Scaled by (1 - alpha) too: grain only belongs where backdrop shows
-        # through, and the sqrt is steep near zero, so the blur's faint tail
-        # would otherwise sprinkle grain over the subject.
-        grain_weight = np.sqrt(np.clip(1.0 - (1.0 - w_soft) ** 2, 0, 1))
-        grain_weight *= (1.0 - alpha)[..., None]
+        chol = chol.astype(np.float32)
         noise = _block_noise(box, (H, W), light.seed, sigma)
-        grain = grain_weight * cv2.transform(noise, chol.astype(np.float32))
+
+    # Everything from here is per pixel: worked out in bands of rows on all
+    # cores, into arrays made up front (the same arithmetic as one pass).
+    w_soft = np.empty((h, w, 1), np.float32)
+    base = np.empty_like(rgb)
+    even = np.empty_like(rgb)
+    grain = None if noise is None else np.empty_like(rgb)
+
+    def band(a: int, b: int) -> None:
+        al = alpha[a:b]
+        # A Gaussian never quite reaches zero; its tail times the large subject-to-
+        # backdrop difference would tint the subject, so cap by the backdrop share.
+        ws = np.minimum(soft[a:b], 1.0 - al)[..., None]
+        w_soft[a:b] = ws
+        edge_share = (1.0 - ws) * (1.0 - al)[..., None]
+        base[a:b] = ws * (lf[a:b] - rgb[a:b]) + edge_share * delta_ext[a:b]
+        even[a:b] = ws * to_even[a:b] + edge_share * delta_even[a:b]
+        if grain is not None:
+            # Original grain survives with weight (1 - w_soft). Two independent
+            # noises blended linearly lose up to ~30% of their strength, which
+            # would show as a smooth ring around the subject, so synthetic grain
+            # is added in quadrature. Scaled by (1 - alpha) too: grain only
+            # belongs where backdrop shows through, and the sqrt is steep near
+            # zero, so the blur's faint tail would otherwise sprinkle grain over
+            # the subject.
+            grain_weight = np.sqrt(np.clip(1.0 - (1.0 - ws) ** 2, 0, 1)) * (1.0 - al)[..., None]
+            grain[a:b] = grain_weight * cv2.transform(noise[a:b], chol)
+
+    parallel.for_bands(band, h, w)
 
     return Prepared(rgb, base, even, grain, alpha, w_soft, light.lf, light.to_even, box, (H, W))
 

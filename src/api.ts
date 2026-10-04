@@ -85,6 +85,10 @@ export interface SkinParams {
 export type EngineEvent =
   | { event: "status"; message: string }
   | { event: "progress"; fraction: number } // how far the export under way is, 0..1
+  | { event: "written"; path: string; error?: string } // an export written in the background
+  // First-launch setup of the AI engine (released app): what it's doing and how far
+  // along (0..1, or null), or what went wrong.
+  | { event: "setup"; message?: string; fraction?: number | null; error?: string }
   | { event: "stopped" };
 
 export function call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {

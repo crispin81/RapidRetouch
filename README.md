@@ -32,9 +32,7 @@ Skin, Dodge & burn, Eyes and Mouth each have an Opacity that fades the whole pan
 
 Plus: a film strip with multi-select, copy/paste of settings, presets, a per-panel
 "Hold for before", crop & straighten, and batch export to 16-bit TIFF or
-maximum-quality JPEG with a progress bar per photo. Each export gets a
-`<file>.retouch.json` sidecar recording every step, its settings and the exact AI
-model versions used.
+maximum-quality JPEG (optionally scaled to a long edge) with a progress bar per photo.
 
 ## AI models
 
@@ -53,6 +51,38 @@ All the retouching sliders themselves are classic image processing (frequency
 separation, edge-aware filters, linear-light dodge & burn), not generative AI, so
 faces are never redrawn. Models with non-commercial licences may be offered later
 as opt-in extras, behind a licence prompt.
+
+## Installing
+
+Download the installer for your computer from
+[Releases](https://github.com/crispin81/RapidRetouch/releases), install it, and open
+RapidRetouch. There's nothing to set up.
+
+- **Windows** (64-bit): `RapidRetouch_…_x64-setup.exe` (or the `.msi`).
+- **Mac** (Apple Silicon: M1 and later): `RapidRetouch_…_aarch64.dmg`. Open it and drag
+  RapidRetouch into Applications. Intel Macs aren't supported: the AI library it uses
+  no longer makes Intel Mac versions.
+- **Linux**: `RapidRetouch_…_amd64.AppImage` runs on most distributions (make it
+  executable, then open it), or install the `.deb` / `.rpm` for your distribution.
+
+**First launch:** RapidRetouch downloads its AI engine once, showing its progress as it
+goes: about 3 GB on a PC with an NVIDIA graphics card (which it then uses for speed),
+about 1 GB otherwise. It needs an internet connection for that, and about 7 GB of disk
+space with an NVIDIA card (2–3 GB otherwise). After that it starts straight away and
+works offline, apart from downloading each AI model the first time a tool needs it.
+
+**The installers aren't code-signed yet** (that needs a paid developer certificate), so
+your computer will warn that the publisher is unverified the first time:
+
+- **Windows**: SmartScreen says "Windows protected your PC". Click **More info**, then
+  **Run anyway**.
+- **Mac**: macOS refuses to open it the first time. Either run this once in Terminal,
+  then open it as normal:
+  ```
+  xattr -d com.apple.quarantine /Applications/RapidRetouch.app
+  ```
+  or try to open it once, then go to **System Settings → Privacy & Security**, scroll to
+  the note about RapidRetouch and click **Open Anyway**.
 
 ## Running from source
 

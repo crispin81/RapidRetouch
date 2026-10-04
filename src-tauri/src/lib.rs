@@ -17,8 +17,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let engine = Engine::spawn(app.handle().clone())?;
-            app.manage(engine);
+            // Starts (and on first launch sets up) in the background.
+            app.manage(Engine::spawn(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_call])

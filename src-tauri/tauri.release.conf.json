@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/uv"],
+    "resources": {
+      "../engine/pyproject.toml": "engine/pyproject.toml",
+      "../engine/uv.lock": "engine/uv.lock",
+      "../engine/README.md": "engine/README.md",
+      "../engine/src/": "engine/src/"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/installer/nsis-header.bmp",
+        "sidebarImage": "icons/installer/nsis-sidebar.bmp"
+      },
+      "wix": {
+        "bannerPath": "icons/installer/wix-banner.bmp",
+        "dialogImagePath": "icons/installer/wix-dialog.bmp"
+      }
+    }
+  }
+}

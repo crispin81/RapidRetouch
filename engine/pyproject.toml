@@ -1,6 +1,6 @@
 [project]
 name = "rapidretouch-engine"
-version = "0.1.0"
+version = "1.0.0"
 description = "Image-processing and model-inference engine for RapidRetouch"
 readme = "README.md"
 authors = [
@@ -29,18 +29,40 @@ dependencies = [
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
 
+# PyTorch builds: the app's first-run setup installs one group, "cuda" on a
+# PC with an NVIDIA card, "cpu" otherwise. Macs get PyPI's build (with Apple
+# GPU support) either way. Development uses "cuda" by default.
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = [
+    { index = "pytorch-cu128", group = "cuda", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform != 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", group = "cuda", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cpu", group = "cpu", marker = "sys_platform != 'darwin'" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+]
+cuda = [
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+]
+cpu = [
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
 ]
 
 [project.scripts]
@@ -51,3 +73,11 @@ rapidretouch-engine = "rapidretouch_engine.cli:main"
 # module as our opencv-python-headless and silently overwrites it. Its face tasks
 # don't need the contrib build, so keep only the headless one.
 override-dependencies = ["opencv-contrib-python; sys_platform == 'never'"]
+default-groups = ["dev", "cuda"]
+conflicts = [[{ group = "cpu" }, { group = "cuda" }]]
+# The platforms the app is released for (PyTorch has no Intel Mac builds).
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   FolderOpen,
   Download,
@@ -38,7 +39,8 @@ import {
   onEngineEvent,
 } from "./api";
 import About from "./About";
-import ExportDialog, { ExportFormat, ExportRow } from "./ExportDialog";
+import SetupScreen from "./SetupScreen";
+import ExportDialog, { ExportFormat, ExportRow, ExportSize } from "./ExportDialog";
 import BrushBar from "./BrushBar";
 import OpacityGroup from "./OpacityGroup";
 import PaintOverlay from "./PaintOverlay";
@@ -100,11 +102,21 @@ const LINKS_TIMEOUT_MS = 5000;
 const TUTORIAL_URL_KEY = "rapidretouch.tutorialUrl";
 const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
 const EXPORT_FORMAT_KEY = "rapidretouch.exportFormat";
+// About opens by itself on the first launch and after each update (the
+// version it was last shown for), then only from its button.
+const ABOUT_SEEN_KEY = "rapidretouch.aboutSeenVersion";
+const EXPORT_SIZE_KEY = "rapidretouch.exportSize";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
 // Scanning: a photo is only opened and processed after this long on it (or as
 // soon as it's edited), so stepping through a shoot isn't slowed down.
 const OPEN_DELAY_MS = 3000;
+// The photo-switch progress bar: where it starts, and each engine step moves
+// it this share of the way to PREP_DONE_AT (it fills when the photo's ready).
+const PREP_START = 0.08;
+const PREP_PREVIEW = 0.3; // the camera's preview is showing, the retouched version still to come
+const PREP_STEP = 0.3;
+const PREP_DONE_AT = 0.92;
 import "./App.css";
 
 const DEFAULTS: BackdropParams = {
@@ -641,6 +653,13 @@ export default function App() {
   const [copied, setCopied] = useState<PhotoSettings | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const settingsByPath = useRef(new Map<string, PhotoSettings>());
+  // Switching photo: a progress bar (on its thumbnail and along the top of the
+  // viewer) while it's prepared, nudged on by each step the engine reports.
+  const [prep, setPrep] = useState<{ path: string; fraction: number } | null>(null);
+  // First-launch setup of the AI engine (released app only), while it runs.
+  const [setup, setSetup] = useState<{ message: string; fraction: number | null; error: string | null } | null>(
+    null,
+  );
   const [tutorialUrl, setTutorialUrl] = useState<string | null>(() => {
     try {
       return localStorage.getItem(TUTORIAL_URL_KEY);
@@ -706,6 +725,12 @@ export default function App() {
   const [exportCancelling, setExportCancelling] = useState(false);
   const exportCancel = useRef(false);
   const exportingPath = useRef<string | null>(null);
+  // Exports being written in the background, by output path: settled by the
+  // engine's "written" event.
+  const pendingWrites = useRef(new Map<string, (error?: string) => void>());
+  // "written" events that came in before their export call returned (a small
+  // file can be written that fast): picked up when the call does.
+  const writtenEarly = useRef(new Map<string, string | undefined>());
   const [exportFormat, setExportFormat] = useState<ExportFormat>(() => {
     try {
       return localStorage.getItem(EXPORT_FORMAT_KEY) === "jpeg" ? "jpeg" : "tiff";
@@ -714,6 +739,15 @@ export default function App() {
     }
   });
   const [exportFolder, setExportFolder] = useState<string | null>(null);
+  const [exportSize, setExportSize] = useState<ExportSize>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(EXPORT_SIZE_KEY) ?? "null");
+      if (saved && (saved.mode === "full" || saved.mode === "long") && typeof saved.px === "number") return saved;
+    } catch {
+      // unreadable: the default
+    }
+    return { mode: "full", px: 2048 };
+  });
   const cropRef = useRef(crop);
   const [cropping, setCropping] = useState(false);
   const [cropAspect, setCropAspect] = useState<string>("Free");
@@ -755,6 +789,16 @@ export default function App() {
     const unlisten = onEngineEvent((e) => {
       if (e.event === "status") {
         setStatus(e.message);
+        setPrep((p) => (p ? { ...p, fraction: p.fraction + (PREP_DONE_AT - p.fraction) * PREP_STEP } : p));
+      } else if (e.event === "setup") {
+        if (e.error) setSetup({ message: "", fraction: null, error: e.error });
+        else if (e.fraction === 1) setSetup(null);
+        else setSetup({ message: e.message ?? "", fraction: e.fraction ?? null, error: null });
+      } else if (e.event === "written") {
+        const settle = pendingWrites.current.get(e.path);
+        pendingWrites.current.delete(e.path);
+        if (settle) settle(e.error);
+        else writtenEarly.current.set(e.path, e.error);
       } else if (e.event === "progress") {
         const path = exportingPath.current;
         if (path)
@@ -856,6 +900,8 @@ export default function App() {
     }
     inFlight.current = true;
     setBusy(true);
+    const path = activePath.current;
+    if (path && openedPath.current !== path) setPrep((p) => (p?.path === path ? p : { path, fraction: PREP_START }));
     try {
       if (!(await ensureOpen())) return;
       do {
@@ -867,6 +913,7 @@ export default function App() {
         // Moved on to another photo meanwhile: don't show this one's result.
         if (forPath !== activePath.current) break;
         setResult(r.preview);
+        setPrep((p) => (p?.path === forPath ? null : p)); // the retouched version is on screen
         setFaces(r.faces);
       } while (dirty.current);
       setStatus("Ready");
@@ -883,6 +930,7 @@ export default function App() {
     } catch (e) {
       handleError(e);
     } finally {
+      setPrep((p) => (p?.path === path ? null : p));
       inFlight.current = false;
       setBusy(false);
     }
@@ -1163,6 +1211,7 @@ export default function App() {
       markEdited(current, currentSettings());
     }
     activePath.current = path;
+    setPrep({ path, fraction: PREP_START });
     if (irisScaleFor.current !== path) setIrisScale(null);
     window.clearTimeout(openTimer.current);
     stopCountdown();
@@ -1196,6 +1245,9 @@ export default function App() {
         edge: PREVIEW_EDGE,
       });
       if (activePath.current !== path) return;
+      // Its camera preview is showing; the bar carries on until the
+      // retouched version replaces it.
+      setPrep((p) => (p?.path === path ? { path, fraction: Math.max(p.fraction, PREP_PREVIEW) } : p));
       if (!saved) applyDetectedScene(path, q.scene);
       setImage({
         path,
@@ -1304,13 +1356,41 @@ export default function App() {
 
   // About: the app, its licence and the AI models it uses (from the engine's
   // own list, so it's always accurate).
-  const showAbout = async () => {
+  const showAbout = async (): Promise<boolean> => {
     try {
       setAboutModels(await call<ModelInfo[]>("models"));
+      return true;
     } catch (e) {
       handleError(e);
+      return false;
     }
   };
+
+  useEffect(() => {
+    getVersion()
+      .then((version) => {
+        let seen: string | null = null;
+        try {
+          seen = localStorage.getItem(ABOUT_SEEN_KEY);
+        } catch {
+          // storage unavailable: show it, as on a first launch
+        }
+        if (seen === version) return;
+        // Counted as seen only once it has actually opened (not when the
+        // engine couldn't start, say).
+        showAbout().then((shown) => {
+          if (!shown) return;
+          try {
+            localStorage.setItem(ABOUT_SEEN_KEY, version);
+          } catch {
+            // only a convenience
+          }
+        });
+      })
+      .catch(() => undefined);
+    // Once, at start-up.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const copySettings = () => {
     setCopied(currentSettings());
@@ -1363,8 +1443,18 @@ export default function App() {
   const applyPreset = (preset: Preset) => {
     const targets = presetTargets();
     for (const path of targets) {
+      // A photo never opened has no settings yet: keep the mode detected on
+      // import (else a preset turned an outdoor photo's backdrop step on),
+      // and keep it automatic, so a detection still to come sets it.
+      const fresh = path !== image?.path && !settingsByPath.current.has(path);
+      if (fresh) autoMode.current.add(path);
       const current =
-        path === image?.path ? currentSettings() : (settingsByPath.current.get(path) ?? ALL_DEFAULTS);
+        path === image?.path
+          ? currentSettings()
+          : (settingsByPath.current.get(path) ?? {
+              ...ALL_DEFAULTS,
+              outdoor: strip.find((i) => i.path === path)?.scene === "outdoor",
+            });
       const st = withPreset(preset.settings, current.outdoor, current.crop);
       if (path === image?.path) {
         applySettings(st);
@@ -1635,6 +1725,7 @@ export default function App() {
     setExportRunning(true);
     setBusy(true);
     const ext = exportFormat === "tiff" ? "tif" : "jpg";
+    const writes: Promise<void>[] = [];
     // The photo the engine has open goes first: it's ready to go.
     const order = exportRows
       .map((r) => r.path)
@@ -1647,13 +1738,15 @@ export default function App() {
       exportingPath.current = path;
       update(path, { state: "exporting", fraction: 0.02 });
       try {
-        const st =
-          path === activePath.current
-            ? currentSettings()
-            : (settingsByPath.current.get(path) ?? {
-                ...ALL_DEFAULTS,
-                outdoor: strip.find((i) => i.path === path)?.scene === "outdoor",
-              });
+        let st = path === activePath.current ? currentSettings() : settingsByPath.current.get(path);
+        if (path !== activePath.current && (!st || autoMode.current.has(path))) {
+          // Its mode wasn't chosen by hand: the detected one, detected now if
+          // its thumbnail hasn't come in yet.
+          let scene = strip.find((i) => i.path === path)?.scene;
+          if (!scene) scene = (await call<{ scene: "backdrop" | "outdoor" }>("thumbnail", { path })).scene;
+          st = { ...(st ?? ALL_DEFAULTS), outdoor: scene === "outdoor" };
+        }
+        if (!st) st = ALL_DEFAULTS;
         if (openedPath.current !== path) {
           const r = await call<OpenResult>("open", { path });
           openedPath.current = path;
@@ -1663,17 +1756,35 @@ export default function App() {
         const out = exportFolder
           ? `${exportFolder}/${stem.split("/").pop()}_retouched.${ext}`
           : `${stem}_retouched.${ext}`;
-        const r = await call<{ path: string }>("export", {
+        const r = await call<{ path: string; pending: boolean }>("export", {
           path: out,
           ...lookArgsFor(st),
           crop: isNoCrop(st.crop) ? null : st.crop,
+          long_edge: exportFormat === "jpeg" && exportSize.mode === "long" ? exportSize.px : null,
+          background: true,
         });
-        update(path, { state: "done", fraction: 1, message: r.path });
+        // Written while the next photo is retouched: done once the file is.
+        update(path, { fraction: 0.95, message: "Writing…" });
+        writes.push(
+          new Promise<void>((resolve) => {
+            const settle = (error?: string) => {
+              update(path, error ? { state: "failed", message: error } : { state: "done", fraction: 1, message: r.path });
+              resolve();
+            };
+            if (!r.pending) settle();
+            else if (writtenEarly.current.has(r.path)) {
+              const error = writtenEarly.current.get(r.path);
+              writtenEarly.current.delete(r.path);
+              settle(error);
+            } else pendingWrites.current.set(r.path, settle);
+          }),
+        );
       } catch (e) {
         update(path, { state: "failed", message: errorMessage(e) });
       }
     }
     exportingPath.current = null;
+    await Promise.all(writes); // the last files may still be being written
     setExportRunning(false);
     setBusy(false);
     // Back to the photo being edited.
@@ -1790,6 +1901,11 @@ export default function App() {
       </header>
 
       <main className="viewer" onDragStart={(e) => e.preventDefault()}>
+        {prep && prep.path === activePath.current && (
+          <div className="viewer__progress" title="Preparing this photo">
+            <div style={{ width: `${prep.fraction * 100}%` }} />
+          </div>
+        )}
         <Viewer
           ref={viewerRef}
           src={shown ? jpegSrc(shown) : null}
@@ -2592,6 +2708,7 @@ export default function App() {
 
       {strip.length > 0 && (
         <FilmStrip
+          progress={prep}
           items={strip.map((i) =>
             // The photo being edited: its dot follows the sliders live.
             i.path === image?.path
@@ -2656,6 +2773,15 @@ export default function App() {
         <ExportDialog
           rows={exportRows}
           format={exportFormat}
+          size={exportSize}
+          onSize={(sz) => {
+            setExportSize(sz);
+            try {
+              localStorage.setItem(EXPORT_SIZE_KEY, JSON.stringify(sz));
+            } catch {
+              // only a convenience
+            }
+          }}
           folder={exportFolder}
           running={exportRunning}
           cancelling={exportCancelling}
@@ -2677,6 +2803,7 @@ export default function App() {
           onClose={() => setExportRows(null)}
         />
       )}
+      {setup && <SetupScreen {...setup} />}
       {aboutModels && <About models={aboutModels} onClose={() => setAboutModels(null)} />}
       {licencePrompt && (
         <div className="modal">

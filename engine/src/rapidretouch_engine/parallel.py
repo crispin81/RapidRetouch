@@ -61,3 +61,21 @@ def by_bands(fn: Callable[[int, int], np.ndarray], h: int, w: int) -> np.ndarray
             _inside.on = False
 
     return np.concatenate(list(_pool.map(band, range(THREADS))), axis=0)
+
+
+def for_bands(fn: Callable[[int, int], None], h: int, w: int) -> None:
+    """``fn(a, b)`` for bands of rows a..b covering 0..h, in parallel: for
+    per-pixel work that fills preallocated arrays in place."""
+    if _pool is None or h * w < MIN_PIXELS or h < 2 * THREADS or getattr(_inside, "on", False):
+        fn(0, h)
+        return
+    bounds = np.linspace(0, h, THREADS + 1).astype(int)
+
+    def band(i: int) -> None:
+        _inside.on = True
+        try:
+            fn(int(bounds[i]), int(bounds[i + 1]))
+        finally:
+            _inside.on = False
+
+    list(_pool.map(band, range(THREADS)))

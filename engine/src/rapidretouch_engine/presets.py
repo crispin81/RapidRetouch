@@ -1,6 +1,6 @@
 """Saved presets: named sets of slider settings, one JSON file each.
 
-Stored in the user's config folder (XDG), so they survive reinstalls and can
+Stored in the user's config folder, so they survive reinstalls and can
 be backed up or shared by copying the files.
 """
 
@@ -9,12 +9,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 
 def folder() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(base) / "rapidretouch" / "presets"
+    """%APPDATA%\\RapidRetouch\\presets on Windows, ~/Library/Application
+    Support/RapidRetouch/presets on a Mac, $XDG_CONFIG_HOME/rapidretouch/presets
+    on Linux."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "RapidRetouch"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "RapidRetouch"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rapidretouch"
+    return base / "presets"
 
 
 def _file(name: str) -> Path:
