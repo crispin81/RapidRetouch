@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { photoGeometry } from "./photoGeometry";
 
 /** Crop and straighten, as the engine applies it at export: the photo is
  * turned by ``angle`` degrees (positive clockwise) about its centre on a
@@ -106,6 +107,13 @@ export function cropToRatio(c: Crop, ratio: number, w: number, h: number): Crop 
   return fitCrop({ angle: c.angle, x0: cx - fw, y0: cy - fh, x1: cx + fw, y1: cy + fh }, w, h);
 }
 
+/** The photo's own rectangle on screen, as if not turned (the viewer turns
+ * it about its centre for a straightened crop; its bounding box is bigger). */
+function unturnedRect(image: HTMLImageElement) {
+  const g = photoGeometry(image);
+  return { left: g.cx - g.w / 2, top: g.cy - g.h / 2, width: g.w, height: g.h };
+}
+
 interface Props {
   /** The displayed photo (its on-screen rectangle and pixels). */
   image: HTMLImageElement | null;
@@ -147,7 +155,7 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
     // redraws.
     if (editing && (!image.complete || image.naturalWidth === 0)) return;
     const c = canvas.getBoundingClientRect();
-    const img = image.getBoundingClientRect();
+    const img = unturnedRect(image);
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(c.width * dpr);
     const bh = Math.round(c.height * dpr);
@@ -165,18 +173,12 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
     const { angle, x0, y0, x1, y1 } = cropRef.current;
 
     if (!editing) {
-      // The photo as it is, with what the crop cuts off hidden: painted in
-      // the viewer's own background, so the photo simply looks cropped.
-      const pts = [
-        [x0, y0],
-        [x1, y0],
-        [x1, y1],
-        [x0, y1],
-      ].map(([x, y]) => source(x, y, angle, width, height));
+      // The viewer shows the photo turned (see Viewer's rotation), so the
+      // crop is a plain rectangle on screen: everything outside it is hidden,
+      // painted in the viewer's own background, so the photo looks as exported.
       ctx.beginPath();
-      ctx.rect(ox, oy, iw, ih);
-      pts.forEach(([x, y], i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, ox + x * iw, oy + y * ih));
-      ctx.closePath();
+      ctx.rect(0, 0, c.width, c.height);
+      ctx.rect(ox + x0 * iw, oy + y0 * ih, (x1 - x0) * iw, (y1 - y0) * ih);
       ctx.fillStyle = VIEWER_BACKGROUND;
       ctx.fill("evenodd");
       return;
@@ -273,7 +275,7 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
   /** Pointer position as fractions of the photo's on-screen rectangle, and
    * the handle under it. */
   const locate = (e: React.PointerEvent): { at: [number, number]; handle: Handle } => {
-    const img = image!.getBoundingClientRect();
+    const img = unturnedRect(image!);
     const px = e.clientX - img.left;
     const py = e.clientY - img.top;
     const { x0, y0, x1, y1 } = cropRef.current;
@@ -309,7 +311,7 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
 
   /** The pointer's direction from the frame's centre, in degrees on screen. */
   const turnAt = (e: React.PointerEvent, c: Crop) => {
-    const img = image!.getBoundingClientRect();
+    const img = unturnedRect(image!);
     const cx = img.left + ((c.x0 + c.x1) / 2) * img.width;
     const cy = img.top + ((c.y0 + c.y1) / 2) * img.height;
     return (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI;

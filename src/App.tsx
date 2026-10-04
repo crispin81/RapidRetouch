@@ -1995,6 +1995,10 @@ export default function App() {
           imgRef={setImgEl}
           onDetailNeeded={onDetailNeeded}
           onZoomChange={setZoomLabel}
+          // Straightened and cropped as it will export, except while cropping
+          // (the crop tool shows the whole photo itself).
+          rotation={cropping ? 0 : crop.angle}
+          frame={cropping || isNoCrop(crop) ? null : crop}
           empty={<div className="viewer__empty">Open a RAW file, 16-bit TIFF or JPEG to start</div>}
         >
           {({ panning }) => (

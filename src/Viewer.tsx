@@ -31,6 +31,12 @@ interface Props {
    * past the preview's own detail; null when the preview is sharp enough. */
   onDetailNeeded: (region: [number, number, number, number] | null, scale: number) => void;
   onZoomChange: (label: string) => void;
+  /** A straightened crop: the photo is shown turned this many degrees
+   * (clockwise, about its centre) ... */
+  rotation?: number;
+  /** ... and the view fits and keeps to this part of it (fractions of the
+   * turned photo; the rest is hidden by the crop overlay). */
+  frame?: { x0: number; y0: number; x1: number; y1: number } | null;
   empty: ReactNode;
   children: (state: { panning: boolean }) => ReactNode;
 }
@@ -48,7 +54,20 @@ const DETAIL_PAD = 0.25; // extra area around the view, so small pans stay sharp
  * means one image pixel per device pixel.
  */
 const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(
-  { src, size, previewEdge, zoomTool, detail, imgRef, onDetailNeeded, onZoomChange, empty, children },
+  {
+    src,
+    size,
+    previewEdge,
+    zoomTool,
+    detail,
+    imgRef,
+    onDetailNeeded,
+    onZoomChange,
+    rotation = 0,
+    frame = null,
+    empty,
+    children,
+  },
   ref,
 ) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -61,23 +80,30 @@ const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(
   const [dragging, setDragging] = useState(false);
   const dpr = window.devicePixelRatio || 1;
 
+  const f = frame ?? { x0: 0, y0: 0, x1: 1, y1: 1 };
   const fitScale = useCallback(() => {
     if (!size || !box.w) return 1;
-    return Math.min((box.w - 2 * MARGIN) / size.width, (box.h - 2 * MARGIN) / size.height);
-  }, [size, box]);
+    const fw = size.width * (f.x1 - f.x0);
+    const fh = size.height * (f.y1 - f.y0);
+    return Math.min((box.w - 2 * MARGIN) / fw, (box.h - 2 * MARGIN) / fh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size, box, f.x0, f.y0, f.x1, f.y1]);
 
-  /** Keep the image on screen: centred when smaller than the view, otherwise
-   * its edges may come no further in than the middle of the view. */
+  /** Keep the image (or its crop) on screen: centred when smaller than the
+   * view, otherwise its edges may come no further in than the middle of it. */
   const clamp = useCallback(
     (v: { scale: number; x: number; y: number }) => {
       if (!size) return v;
-      const sw = size.width * v.scale;
-      const sh = size.height * v.scale;
-      const x = sw <= box.w ? (box.w - sw) / 2 : Math.min(box.w / 2, Math.max(box.w / 2 - sw, v.x));
-      const y = sh <= box.h ? (box.h - sh) / 2 : Math.min(box.h / 2, Math.max(box.h / 2 - sh, v.y));
+      const ox = f.x0 * size.width * v.scale; // the crop's offset in the photo
+      const oy = f.y0 * size.height * v.scale;
+      const sw = (f.x1 - f.x0) * size.width * v.scale;
+      const sh = (f.y1 - f.y0) * size.height * v.scale;
+      const x = sw <= box.w ? (box.w - sw) / 2 - ox : Math.min(box.w / 2 - ox, Math.max(box.w / 2 - ox - sw, v.x));
+      const y = sh <= box.h ? (box.h - sh) / 2 - oy : Math.min(box.h / 2 - oy, Math.max(box.h / 2 - oy - sh, v.y));
       return { scale: v.scale, x, y };
     },
-    [size, box],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [size, box, f.x0, f.y0, f.x1, f.y1],
   );
 
   const fit = useCallback(() => {
@@ -117,6 +143,13 @@ const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(
     if (fitMode.current) fit();
     else setView((v) => clamp(v));
   }, [box, size, fit, clamp]);
+
+  // A changed crop: fitted to it again (or kept on screen, if zoomed in).
+  useEffect(() => {
+    if (fitMode.current) fit();
+    else setView((v) => clamp(v));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [f.x0, f.y0, f.x1, f.y1, rotation]);
 
   // A new image starts fitted.
   useEffect(() => {
@@ -212,20 +245,37 @@ const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(
       return;
     }
     const t = setTimeout(() => {
-      const vx0 = -view.x / view.scale;
-      const vy0 = -view.y / view.scale;
-      const vw = box.w / view.scale;
-      const vh = box.h / view.scale;
+      // The view's corners (with margin) in photo pixels, through the turn:
+      // the photo is turned about its centre on screen.
+      const s = view.scale;
+      const cx = view.x + (size.width * s) / 2;
+      const cy = view.y + (size.height * s) / 2;
+      const a = (-rotation * Math.PI) / 180;
+      const pw = box.w * DETAIL_PAD;
+      const ph = box.h * DETAIL_PAD;
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (const [px, py] of [
+        [-pw, -ph],
+        [box.w + pw, -ph],
+        [-pw, box.h + ph],
+        [box.w + pw, box.h + ph],
+      ]) {
+        const dx = px - cx;
+        const dy = py - cy;
+        xs.push((dx * Math.cos(a) - dy * Math.sin(a)) / s + size.width / 2);
+        ys.push((dx * Math.sin(a) + dy * Math.cos(a)) / s + size.height / 2);
+      }
       const region: [number, number, number, number] = [
-        Math.max(0, vx0 - vw * DETAIL_PAD),
-        Math.max(0, vy0 - vh * DETAIL_PAD),
-        Math.min(size.width, vx0 + vw * (1 + DETAIL_PAD)),
-        Math.min(size.height, vy0 + vh * (1 + DETAIL_PAD)),
+        Math.max(0, Math.min(...xs)),
+        Math.max(0, Math.min(...ys)),
+        Math.min(size.width, Math.max(...xs)),
+        Math.min(size.height, Math.max(...ys)),
       ];
       onDetailNeeded(region, Math.min(1, devicePerFull));
     }, DETAIL_DELAY);
     return () => clearTimeout(t);
-  }, [view, box, size, previewEdge, dpr, onDetailNeeded]);
+  }, [view, box, size, previewEdge, dpr, onDetailNeeded, rotation]);
 
   const cursor = panning
     ? dragging
@@ -254,10 +304,17 @@ const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(
           style={{
             width: size.width * view.scale,
             height: size.height * view.scale,
-            transform: `translate(${view.x}px, ${view.y}px)`,
+            transform: `translate(${view.x}px, ${view.y}px) rotate(${rotation}deg)`,
           }}
         >
-          <img ref={imgRef} src={src} alt="" className="viewer__image" draggable={false} />
+          <img
+            ref={imgRef}
+            src={src}
+            alt=""
+            className="viewer__image"
+            draggable={false}
+            data-rotation={rotation}
+          />
           {detail && (
             <img
               src={`data:image/jpeg;base64,${detail.image}`}

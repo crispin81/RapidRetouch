@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { drawOnPhoto, photoGeometry, toPhoto } from "./photoGeometry";
 
 type Pt = [number, number];
 
@@ -40,7 +41,8 @@ export default function PatchOverlay({ image, active, pending, onPatch }: Props)
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
     const c = canvas.getBoundingClientRect();
-    const img = image.getBoundingClientRect();
+    const g = photoGeometry(image);
+    const img = { width: g.w, height: g.h };
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(c.width * dpr);
     const bh = Math.round(c.height * dpr);
@@ -54,8 +56,10 @@ export default function PatchOverlay({ image, active, pending, onPatch }: Props)
     const pts = outline.current;
     if (pts.length < 2) return;
 
-    const ox = img.left - c.left;
-    const oy = img.top - c.top;
+    // Photo-fraction coordinates -> canvas pixels, turned with the photo.
+    drawOnPhoto(ctx, g, c.left, c.top);
+    const ox = 0;
+    const oy = 0;
     const path = (dx: number, dy: number) => {
       ctx.beginPath();
       pts.forEach(([x, y], i) => {
@@ -130,8 +134,7 @@ export default function PatchOverlay({ image, active, pending, onPatch }: Props)
 
   const toImage = (e: React.PointerEvent): Pt | null => {
     if (!image) return null;
-    const r = image.getBoundingClientRect();
-    return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+    return toPhoto(photoGeometry(image), e.clientX, e.clientY);
   };
   const clamp = ([x, y]: Pt): Pt => [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
 

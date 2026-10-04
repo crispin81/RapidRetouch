@@ -452,3 +452,7 @@ pause while a render is running (they took a laptop's CPU from the photo being e
 - **Crop:** outside crop mode, what the crop cuts off is hidden (painted in the viewer's background),
   not dimmed: Chris didn't want a dark bar showing what was there. The crop bar sits lower and can be
   dragged by its grip. Enter/Esc finish cropping even while the Straighten slider has focus.
+- **Straightened crops show as exported:** outside crop mode, Viewer turns its stage about the photo's
+  centre (`rotation`) and fits/clamps to the crop (`frame`). Overlays map the pointer and draw through
+  `photoGeometry.ts`, because a turned element's bounding box isn't the photo. Zoom detail requests
+  cover the turned view's bounding region.

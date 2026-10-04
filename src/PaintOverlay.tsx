@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { drawOnPhoto, photoGeometry, toPhoto } from "./photoGeometry";
 
 interface Props {
   /** The displayed photo strokes are mapped onto. */
@@ -41,7 +42,7 @@ export default function PaintOverlay({
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
     const c = canvas.getBoundingClientRect();
-    const img = image.getBoundingClientRect();
+    const g = photoGeometry(image);
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(c.width * dpr);
     const bh = Math.round(c.height * dpr);
@@ -53,12 +54,11 @@ export default function PaintOverlay({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
 
-    // Image-fraction coordinates -> canvas pixels.
-    const ox = img.left - c.left;
-    const oy = img.top - c.top;
-    const px = (x: number) => ox + x * img.width;
-    const py = (y: number) => oy + y * img.height;
-    const radiusPx = radius * Math.max(img.width, img.height);
+    // Image-fraction coordinates -> canvas pixels, turned with the photo.
+    drawOnPhoto(ctx, g, c.left, c.top);
+    const px = (x: number) => x * g.w;
+    const py = (y: number) => y * g.h;
+    const radiusPx = radius * Math.max(g.w, g.h);
 
     const pts = points.current;
     if (pts.length) {
@@ -114,8 +114,7 @@ export default function PaintOverlay({
   /** Pointer position as a fraction of the photo (may fall outside 0..1). */
   const toImage = (e: React.PointerEvent): [number, number] | null => {
     if (!image) return null;
-    const r = image.getBoundingClientRect();
-    return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+    return toPhoto(photoGeometry(image), e.clientX, e.clientY);
   };
   const onPhoto = ([x, y]: [number, number]) => x >= 0 && x <= 1 && y >= 0 && y <= 1;
   const clamp = ([x, y]: [number, number]): [number, number] => [
