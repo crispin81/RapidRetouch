@@ -164,10 +164,11 @@ def stubble(
     return np.clip(hair * 1.5, 0, 1).astype(np.float32)
 
 
-def forehead_outline(lm: np.ndarray) -> np.ndarray:
-    """The face outline with its top raised to about the hairline (the
-    landmarks' outline stops partway up the forehead)."""
-    up = -_face_down(lm) * HAIRLINE_REACH * face_width(lm)
+def forehead_outline(lm: np.ndarray, reach: float | None = None) -> np.ndarray:
+    """The face outline with its top raised by ``reach`` face widths
+    (HAIRLINE_REACH if None), toward the hairline (the landmarks' outline
+    stops partway up the forehead)."""
+    up = -_face_down(lm) * (HAIRLINE_REACH if reach is None else reach) * face_width(lm)
     top = set(FOREHEAD_ARC)
     return np.array([lm[i] + up if i in top else lm[i] for i in FACE_OVAL], np.float32)
 
@@ -206,6 +207,10 @@ BROW_TOPS = [70, 63, 105, 66, 107, 336, 296, 334, 293, 300]  # image-left to rig
 FOREHEAD_ARC = [21, 54, 103, 67, 109, 10, 338, 297, 332, 284, 251]  # upper face outline
 BROW_LIFT = 0.03  # forehead zone starts this far above the brows (face widths)
 HAIRLINE_REACH = 0.12  # the outline landmarks stop short of the hairline
+# The skin map reaches further, to the hairline on a high forehead: the colour
+# test and the hair map stop it at the hair (0.12 left the top of the forehead
+# out on P1167822 and P1256049; 0.3 picked up specks along a hat brim).
+SKIN_FOREHEAD_REACH = 0.22
 FROWN_HEIGHT = 0.1
 NOSE_WINGS = (129, 358)  # beside each nostril
 # The nose (MediaPipe face mesh): bridge, tip, base and the sides down to the
@@ -838,7 +843,7 @@ def _face_boxes(shape: tuple[int, int], faces: list[np.ndarray]):
         fw = face_width(lm)
         if fw < 40:  # too small to retouch meaningfully
             continue
-        pts = lm[FACE_OVAL]
+        pts = forehead_outline(lm, SKIN_FOREHEAD_REACH)  # the face oval, up to the hairline
         x0, y0 = np.maximum(np.floor(pts.min(0) - 0.15 * fw), 0).astype(int)
         x1, y1 = np.minimum(np.ceil(pts.max(0) + 0.15 * fw), [w, h]).astype(int)
         yield lm, fw, (int(x0), int(y0), int(x1), int(y1))
@@ -865,18 +870,22 @@ def _face_weights(work, scale, lm, box, full_shape, edits, head_hair):
     in the crop's pixels."""
     h, w = full_shape
     wlm = (lm - box[:2]) * scale
-    skin_w, hair, model = face_skin(work, wlm)
+    outline = forehead_outline(wlm, SKIN_FOREHEAD_REACH)
+    skin_w, hair, model = face_skin(work, wlm, outline=outline)
     soft = max(0.7, 0.004 * face_width(wlm))
     W = blur(skin_w * (1 - hair), soft)
     # Even tone works on the whole face (not eyes, brows, lips, facial
     # hair or anything too dark to be skin) without the colour test: a
     # red nose fails that test for being red, and was left pink.
-    W_even = np.maximum(W, blur(face_region(work.shape[:2], wlm) * (1 - hair) * _lit(work, model.L_low), soft))
+    W_even = np.maximum(W, blur(face_region(work.shape[:2], wlm, outline=outline) * (1 - hair) * _lit(work, model.L_low), soft))
     if head_hair is not None:
         # Hair over the skin, by the person-parts model: blonde strands
         # pass the colour test and are too soft to read as strands.
-        on_hair = _map_into(head_hair, (0, 0, 1, 1), box, full_shape, work.shape[:2])
-        W_even = W_even * (1 - _smoothstep(on_hair, *HAIR_SURE))
+        # Brown or blonde hair passes the colour test too: with the outline
+        # raised to the hairline, the skin map needs this as much as W_even.
+        on_hair = _smoothstep(_map_into(head_hair, (0, 0, 1, 1), box, full_shape, work.shape[:2]), *HAIR_SURE)
+        W = W * (1 - on_hair)
+        W_even = W_even * (1 - on_hair)
     # The nose is skin, but often fails the colour test for being redder,
     # shinier or shaded down its sides (half strength there on DSC_2376-2):
     # within the nose the tools use the face region instead. Dark nostrils

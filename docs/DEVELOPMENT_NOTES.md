@@ -145,6 +145,11 @@ clears it.
   - About 0.6 looks natural; full strength looks airbrushed.
 - **Blemishes** (the pre-Acne heal) is back as its own slider next to Acne (2026-10-04). It
   catches large pores and small marks. Old presets' `blemishes` load into Blemishes again.
+- **Forehead up to the hairline** (2026-10-04): the skin map's outline is `forehead_outline`
+  raised 0.22 fw (`SKIN_FOREHEAD_REACH`). At 0.12 the top was still missed on P1167822 and
+  P1256049; at 0.3 it picked up specks along a hat brim. Face boxes grow with it. The
+  parts-model hair map now applies to W as well as W_even: brown or blonde hair passed the
+  colour test once the outline reached it.
 - **Nose in the skin map** (2026-10-04): within a feathered landmark nose area (`NOSE_AREA`),
   the colour-tested map takes the whole-face map's value. Full coverage went 17% → 65% on
   P1167822's red nose and 63% → 82% on DSC_2376-2.
@@ -352,8 +357,17 @@ GPU matters.
   - LaMa (FFTs) and BiRefNet (transformer) need op-coverage testing in ONNX.
 - Before going public:
   - Make the repo public (AGPL; the About page links the source).
-  - Add the About photo (600×600 from Chris) and the tutorial video URL
-    (`TUTORIAL_VIDEO_URL`).
+  - Add the About photo (600×600 from Chris).
+- **Tutorial video link:** set `tutorial_video` in `links.json` at the repo root, any time
+  after release; no new release is needed.
+  - The app reads it at start-up from raw.githubusercontent.com (master branch), with a 5 s
+    timeout, and remembers the last link for offline starts.
+  - The "New user? Watch this first!" banner only shows once there's a link.
+  - Needs the repo to be public, since raw files of a private repo aren't readable. Dev
+    builds read the local `links.json` (served by Vite) instead, for testing.
+  - Set to the channel https://www.youtube.com/@ChrisCorkPhotography while Mac/Windows
+    builds are tested; swap in the tutorial video afterwards.
+  - This is the app's only request apart from model downloads.
   - Remove any "beta" from the title bar.
 
 ## 10. Backlog (not started unless asked)
@@ -376,4 +390,4 @@ GPU matters.
 | 13f3c43 | 16-bit TIFF export, About page, coffee note, social links |
 | 4fed7cd | Acne rebuild, crop & straighten, batch export, Temperature/Tint/Vibrance, iris & lip hue |
 | a071e5c | Speed work (area-only zoom, parallel tone/grain), iris hue ×2, colour edges, crop flicker |
-| (next) | Blemishes back, Pores, panel Opacity, beard-safe dodge & burn, nose in skin map, Refine area fix |
+| f270f4e | Blemishes back, Pores, panel Opacity, beard-safe dodge & burn, nose in skin map, Refine area fix |

@@ -88,8 +88,16 @@ const sameValues = (a: object, b: object) => JSON.stringify(a) === JSON.stringif
 const sameSettings = (a: PhotoSettings, b: PhotoSettings) => sameValues(a, b);
 
 const COFFEE_URL = "https://buymeacoffee.com/chriscorkphotography";
-// No tutorial video yet: the banner does nothing until this is set.
-const TUTORIAL_VIDEO_URL: string | null = null;
+// The tutorial video's link lives in links.json in the GitHub repo, read at
+// start-up, so it can be set or changed after a release without a new one.
+// The last link read is remembered, for offline starts. No link: no banner.
+// While developing, the repo's own copy is read (served by Vite), so a link
+// can be tried before it's published.
+const LINKS_URL = import.meta.env.DEV
+  ? "/links.json"
+  : "https://raw.githubusercontent.com/crispin81/RapidRetouch/master/links.json";
+const LINKS_TIMEOUT_MS = 5000;
+const TUTORIAL_URL_KEY = "rapidretouch.tutorialUrl";
 const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
 const EXPORT_FORMAT_KEY = "rapidretouch.exportFormat";
 
@@ -633,6 +641,33 @@ export default function App() {
   const [copied, setCopied] = useState<PhotoSettings | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const settingsByPath = useRef(new Map<string, PhotoSettings>());
+  const [tutorialUrl, setTutorialUrl] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(TUTORIAL_URL_KEY);
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), LINKS_TIMEOUT_MS);
+    fetch(LINKS_URL, { signal: ctrl.signal, cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((links: { tutorial_video?: unknown }) => {
+        const url = typeof links.tutorial_video === "string" ? links.tutorial_video.trim() : "";
+        const valid = /^https:\/\//.test(url) ? url : null;
+        setTutorialUrl(valid);
+        try {
+          if (valid) localStorage.setItem(TUTORIAL_URL_KEY, valid);
+          else localStorage.removeItem(TUTORIAL_URL_KEY);
+        } catch {
+          // storage unavailable: the link is just read again next start
+        }
+      })
+      .catch(() => undefined) // offline or unreachable: keep the remembered link
+      .finally(() => window.clearTimeout(timer));
+    return () => ctrl.abort();
+  }, []);
   const [tutorialDismissed, setTutorialDismissed] = useState(() => {
     try {
       return localStorage.getItem(TUTORIAL_DISMISSED_KEY) === "1";
@@ -1667,14 +1702,14 @@ export default function App() {
     <div className="app">
       <TitleBar />
       <header className="toolbar">
-        {!tutorialDismissed && (
+        {!tutorialDismissed && tutorialUrl && (
           <div className="video-link">
             <a
               className="video-link__cta"
-              href={TUTORIAL_VIDEO_URL ?? "#"}
+              href={tutorialUrl}
               onClick={(e) => {
                 e.preventDefault();
-                if (TUTORIAL_VIDEO_URL) openUrl(TUTORIAL_VIDEO_URL);
+                openUrl(tutorialUrl);
               }}
               title="Watch the tutorial video on YouTube"
             >

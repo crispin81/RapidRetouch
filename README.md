@@ -71,6 +71,9 @@ Engine tests: `cd engine && uv run pytest -q`. Type-check the UI: `npx tsc --noE
 Models download to `~/.local/share/rapidretouch/` the first time they're needed.
 Presets live in `~/.config/rapidretouch/presets/`.
 
+Photos never leave your computer. The app only goes online to download a model the first
+time it's needed and to read `links.json` from this repository (the tutorial video's link).
+
 ## How it's built
 
 - **UI:** Tauri 2 + React + TypeScript (`src/`, `src-tauri/`).
