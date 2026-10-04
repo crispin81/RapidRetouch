@@ -423,3 +423,9 @@ GPU matters.
 means a first install or an update (the setup marker is per version), then only from its button. A
 localStorage "seen version" flag was tried first: it lived in the web engine's storage (on a Mac
 `~/Library/WebKit/<id>`), so it outlived deleting the app's data and the splash never came back.
+
+**Backdrop off by default (2026-10-04, Chris):** Strength and Evenness default to 0 (Brightness was 0
+already), and while Strength and Brightness are both 0 the backdrop step isn't sent at all
+(`backdropLook` in App.tsx), so BiRefNet only runs once it's wanted. That's the slow part without a GPU:
+~8 s at 1024 px on the CPU (`CPU_INPUT_SIZE`), against 30 s+ and 12 GB of memory at 2048. Crease size,
+Grain and Edge protection keep their values, since they're settings for how smoothing works.

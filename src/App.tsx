@@ -132,10 +132,12 @@ const PREP_STEP = 0.3;
 const PREP_DONE_AT = 0.92;
 import "./App.css";
 
+// Off until the user raises Strength (or Brightness): no subject finding, the
+// slow part on a computer without a graphics card, until it's wanted.
 const DEFAULTS: BackdropParams = {
-  strength: 1,
+  strength: 0,
   smoothness: 1.5,
-  evenness: 0.75,
+  evenness: 0,
   grain: 1,
   edge_protect: 0.4,
   exposure: 0,
@@ -379,6 +381,13 @@ function aspectRatio(aspect: string, width: number, height: number): number | nu
   if (aspect === "Original") return width / height;
   const [w, h] = aspect.split(":").map(Number);
   return w / h;
+}
+
+/** The backdrop step's settings for the engine, or null to skip it: in
+ * Outdoor mode, or while it would change nothing (no Strength, no
+ * Brightness), so the subject isn't looked for until it's needed. */
+function backdropLook(outdoor: boolean, p: BackdropParams): BackdropParams | null {
+  return outdoor || (p.strength === 0 && p.exposure === 0) ? null : p;
 }
 
 const ALL_DEFAULTS: PhotoSettings = {
@@ -771,7 +780,7 @@ export default function App() {
   const [modeIsAuto, setModeIsAuto] = useState(false);
   const outdoorRef = useRef(outdoor);
   /** Backdrop settings to send: none when the photo is set to Outdoor. */
-  const backdropArg = () => (outdoorRef.current ? null : paramsRef.current);
+  const backdropArg = () => backdropLook(outdoorRef.current, paramsRef.current);
   const inFlight = useRef(false);
   const dirty = useRef(false);
 
@@ -788,7 +797,7 @@ export default function App() {
   });
   /** The same, for any photo's settings (batch export). */
   const lookArgsFor = (st: PhotoSettings): Record<string, unknown> => ({
-    backdrop: st.outdoor ? null : st.backdrop,
+    backdrop: backdropLook(st.outdoor, st.backdrop),
     eyes: st.eyes,
     skin: st.skin,
     mouth: st.mouth,
