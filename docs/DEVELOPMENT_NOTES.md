@@ -399,6 +399,11 @@ GPU matters.
 
 ## 10. Backlog (not started unless asked)
 
+**For 1.0.1 (Chris, 2026-10-04):**
+- Side-profile faces: skin Texture (and likely the other skin tools) doesn't reach the nose enough. The
+  landmark-based nose area and face outline are probably off when the face is turned; check on a
+  profile shot.
+
 - Background preparation: preload models at start-up and find mask, faces and hair while
   browsing (first preview 4.3 s → ~instant).
 - Time BiRefNet CPU-only; consider ONNX Runtime with DirectML / Core ML / OpenVINO for
@@ -435,3 +440,15 @@ Grain and Edge protection keep their values, since they're settings for how smoo
 each, plus a count cap. Zoomed areas kept: 4, or 2 under 32 GB. Total rather than available memory, so
 behaviour is predictable whatever else is open. A 16 GB laptop gets ~0.6 GB + ~1 GB. Film-strip thumbnails
 pause while a render is running (they took a laptop's CPU from the photo being edited).
+
+**2026-10-04 (later):**
+- **Subject masks are kept per photo** (8-bit, within 3% of memory, `MASK_KEEP_SHARE`), so revisiting a
+  photo doesn't run BiRefNet again: ~10 s → 1.4 s on the CPU.
+- **The whole-photo smoothed backdrop is kept** (`BACKDROP_KEEP_SHARE` 8%: up to ~115 MP on 16 GB), so
+  Skin changes while zoomed in with Neck/Body on take 1.2 s, not 4.9 s.
+- **"Rendering full detail…" badge** while a zoomed view renders. The enlarged preview it replaces
+  hid the fine retouching, which looked like it had been lost.
+- **Dodge & Burn has Refine area** (region `dodge_burn`; `dodge_burn.area()`; edits go in its stage key).
+- **Crop:** outside crop mode, what the crop cuts off is hidden (painted in the viewer's background),
+  not dimmed: Chris didn't want a dark bar showing what was there. The crop bar sits lower and can be
+  dragged by its grip. Enter/Esc finish cropping even while the Straighten slider has focus.

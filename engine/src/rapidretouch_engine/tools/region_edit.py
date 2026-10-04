@@ -13,7 +13,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-REGIONS = ("face", "neck", "body", "clothes")
+REGIONS = ("face", "neck", "body", "clothes", "dodge_burn")
 SOFTNESS = 0.25  # edge blur as a fraction of the brush radius (as the subject mask brush)
 
 

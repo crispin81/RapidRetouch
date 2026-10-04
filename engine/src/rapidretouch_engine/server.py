@@ -55,6 +55,8 @@ MEMORY = system.total_memory()
 STAGE_CACHE_BUDGET = int(0.04 * MEMORY)
 FACE_WINDOW_CACHE_BUDGET = int(0.06 * MEMORY)
 ZOOM_TILES = 4 if MEMORY >= 32 << 30 else 2
+MASK_KEEP_SHARE = 0.03  # film-strip photos' subject masks kept, 8-bit (see open)
+BACKDROP_KEEP_SHARE = 0.08  # the whole smoothed photo is kept if it's at most this share (see _full_pipeline)
 METHODS = {
     "ping",
     "models",
@@ -212,7 +214,13 @@ class Engine:
                 "mask_edits": self.mask_edits,
                 "region_edits": self.region_edits,
                 "faces": self.faces,
+                # The subject mask too (8-bit): finding it again took 20-30 s on
+                # a laptop without a graphics card each time a photo was revisited.
+                "mask": None
+                if self.alpha is None
+                else (self.mask_model, np.round(np.clip(self.alpha, 0, 1) * 255).astype(np.uint8)),
             }
+            self._limit_kept_masks()
         self.status(f"Loading {Path(path).name}")
         self.path = Path(path)
         self.image = imageio.load(path)
@@ -237,6 +245,12 @@ class Engine:
             self.mask_edits = saved["mask_edits"]
             self.region_edits = saved.get("region_edits") or {r: [] for r in region_edit.REGIONS}
             self.faces = saved["faces"]
+            if saved.get("mask") is not None:
+                self.mask_model, kept = saved["mask"]
+                if kept.shape == self.image.rgb.shape[:2]:
+                    self.alpha = kept.astype(np.float32) / 255
+                    self.alpha_preview_raw = _proxy(self.alpha, PREVIEW_EDGE)
+                    self.alpha_preview = mask_edit.apply(self.alpha_preview_raw, self.mask_edits)
             base = self.preview
             for i, stroke in enumerate(saved["strokes"], 1):
                 self.status(f"Restoring edits ({i} of {len(saved['strokes'])})")
@@ -280,6 +294,17 @@ class Engine:
     def delete_preset(self, name: str) -> list[dict]:
         presets.delete(name)
         return presets.list_all()
+
+    def _limit_kept_masks(self) -> None:
+        """Keep the film strip's subject masks within MASK_KEEP_SHARE of memory,
+        dropping those of the photos visited longest ago."""
+        def kept() -> int:
+            return sum(v["mask"][1].nbytes for v in self.sessions.values() if v.get("mask") is not None)
+
+        for session in self.sessions.values():  # oldest first
+            if kept() <= MASK_KEEP_SHARE * MEMORY:
+                break
+            session["mask"] = None
 
     def forget(self, path: str) -> dict:
         """Drop the stored edits of a photo taken out of the film strip."""
@@ -353,6 +378,8 @@ class Engine:
         found_key = (self.edit_version, self.mask_version)
         if region == "face":
             return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"], self._part("hair"))
+        if region == "dodge_burn":
+            return dodge_burn.area(rgb, self._ensure_faces(), self._part("hair"), self.region_edits["dodge_burn"])
         self._ensure_mask()
         if region == "clothes":
             self._creases(rgb, self.alpha_preview, 0.0, self._preview_cache, found_key)
@@ -370,7 +397,7 @@ class Engine:
         return region
 
     def region_view(self, region: str) -> dict:
-        """The area (face, neck, body or clothes) shown in blue over the photo."""
+        """The area (face, neck, body, clothes or dodge & burn) shown in blue over the photo."""
         self._require_image()
         region = self._region(region)
         shown = region_edit.overlay(self._edited_preview(), self._area(region))
@@ -655,13 +682,14 @@ class Engine:
             stages.append(("skin_body", {"neck": asdict(neck_p), "body": asdict(body_p), "edits": body_edits,
                                          "opacity": opacity("skin")}, run))
         db_p = dodge_burn.Params.from_dict(look["dodge_burn"])
+        db_edits = list(self.region_edits["dodge_burn"])
         if not db_p.is_noop() and opacity("dodge_burn") > 0:
             def run(rgb, steps):
-                rgb = dodge_burn.apply(rgb, faces(), db_p, hair())
+                rgb = dodge_burn.apply(rgb, faces(), db_p, hair(), framed_edits(db_edits))
                 if steps is not None:
                     steps.append({"tool": "dodge_burn", "params": asdict(db_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
-            stages.append(("dodge_burn", {**asdict(db_p), "opacity": opacity("dodge_burn")}, run))
+            stages.append(("dodge_burn", {**asdict(db_p), "edits": db_edits, "opacity": opacity("dodge_burn")}, run))
         eyes_p = eye_tool.Params.from_dict(look["eyes"] or {})
         if look["eyes"] is not None and not eyes_p.is_noop() and opacity("eyes") > 0:
             def run(rgb, steps):
@@ -1074,9 +1102,18 @@ class Engine:
             alpha = self._cached("alpha", mask_key, edited_alpha)
 
             light = self._lighting(p, edited, alpha, removal_key, mask_key)
-            self.status("Smoothing backdrop at full resolution")
-            # Not kept: at 100 MP it's several GB, and zooming in has its own path.
-            rgb = backdrop_smooth.compose(backdrop_smooth.prepare(rgb, alpha, p, light), p)
+
+            def smooth():
+                self.status("Smoothing backdrop at full resolution")
+                return backdrop_smooth.compose(backdrop_smooth.prepare(rgb, alpha, p, light), p)
+
+            # The result is kept while memory allows (the working arrays never
+            # are: several GB at 100 MP), so a Skin change while zoomed in with
+            # Neck/Body on (the whole-photo path) doesn't smooth it all again.
+            if rgb.nbytes <= BACKDROP_KEEP_SHARE * MEMORY:
+                rgb = self._cached("backdrop_result", json.dumps([asdict(p), removal_key, mask_key]), smooth)
+            else:
+                rgb = smooth()
             steps.append(
                 {
                     "tool": "backdrop_smooth",

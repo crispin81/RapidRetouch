@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from . import region_edit
 from .colour import linear_to_srgb, srgb_to_linear
 from .eyes import EYES, _inner_feather, _poly_mask
 from .filters import blur, grow_mask, masked_blur
@@ -157,12 +158,34 @@ def contour_zones(shape: tuple[int, int], lm: np.ndarray, fw: float) -> tuple[np
     return soft(dodge), soft(burn)
 
 
-def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params, head_hair: np.ndarray | None = None) -> np.ndarray:
+def apply(
+    rgb: np.ndarray,
+    faces: list[np.ndarray],
+    p: Params,
+    head_hair: np.ndarray | None = None,
+    edits: list[dict] | None = None,
+) -> np.ndarray:
     """Dodge & burn every face. Returns a new rgb. ``head_hair``: the
-    person-parts model's hair map for the whole photo (any size), kept clear."""
-    out = rgb.copy()
+    person-parts model's hair map for the whole photo (any size), kept clear.
+    ``edits``: the user's corrections to where it works (Refine area)."""
     if p.is_noop():
-        return out
+        return rgb.copy()
+    return _dodge_burn(rgb, faces, p, head_hair, edits)
+
+
+def area(
+    rgb: np.ndarray, faces: list[np.ndarray], head_hair: np.ndarray | None = None, edits: list[dict] | None = None
+) -> np.ndarray:
+    """Where dodge & burn works (0..1, the image's size), with the user's
+    corrections: shown blue by the Refine area brush."""
+    found = np.zeros(rgb.shape[:2], np.float32)
+    _dodge_burn(rgb, faces, Params(), head_hair, edits, found)
+    return found
+
+
+def _dodge_burn(rgb, faces, p: Params, head_hair, edits, area_out: np.ndarray | None = None) -> np.ndarray:
+    """apply's work; with ``area_out``, only where it works is found (into it)."""
+    out = rgb if area_out is not None else rgb.copy()
     h, w = rgb.shape[:2]
     for face in faces:
         lm = face[:, :2] * np.array([w, h], np.float32)
@@ -210,6 +233,11 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params, head_hair: np.nda
         weight = weight * (1 - BEARD_KEEP * beard)
         if on_hair is not None:
             weight = weight * (1 - on_hair)
+        weight = region_edit.apply(weight, edits or [], (h, w), (x0, y0, x1, y1))
+        if area_out is not None:
+            shown = cv2.resize(weight, (x1 - x0, y1 - y0), interpolation=cv2.INTER_LINEAR) if s != 1 else weight
+            area_out[y0:y1, x0:x1] = np.maximum(area_out[y0:y1, x0:x1], shown)
+            continue
 
         stops = tone_curve(shape, p)
         if p.contour > 0:

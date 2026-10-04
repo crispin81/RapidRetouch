@@ -1595,3 +1595,33 @@ button.primary {
   background: #ffcc33;
   animation: setup-busy 1.2s ease-in-out infinite;
 }
+
+/* While a zoomed-in view's full detail is being made (top right, clear of
+   the other badges). */
+.viewer__badge--detail {
+  left: auto;
+  right: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The crop bar starts a little lower than the brush bars (clear of the crop
+   frame's top handles) and can be dragged anywhere by its grip. */
+.cropbar {
+  top: 64px;
+}
+
+.cropbar__grip {
+  display: inline-flex;
+  align-items: center;
+  margin: -2px -2px -2px -4px;
+  padding: 2px;
+  color: #8d8e99;
+  cursor: grab;
+  touch-action: none;
+}
+
+.cropbar__grip:active {
+  cursor: grabbing;
+}

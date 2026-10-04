@@ -21,6 +21,7 @@ type Handle = "move" | "rotate" | "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "
 const HANDLE_PX = 12; // how close the pointer must be to grab an edge or corner
 const MIN_FRACTION = 0.03; // smallest crop, as a fraction of the photo
 const DIM = "rgba(0, 0, 0, 0.6)";
+const VIEWER_BACKGROUND = "#101114"; // .viewer in App.css
 const MAX_ANGLE = 45;
 // A curved double arrow, for turning the photo from outside the frame.
 const ROTATE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
@@ -113,7 +114,7 @@ interface Props {
   height: number;
   crop: Crop;
   /** Editing: the photo is shown turned with a frame to drag. Otherwise the
-   * photo is left as it is, with what the crop leaves out dimmed. */
+   * photo is left as it is, with what the crop leaves out hidden. */
   editing: boolean;
   /** Width / height to keep while dragging a corner, or null for free. */
   ratio: number | null;
@@ -164,7 +165,8 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
     const { angle, x0, y0, x1, y1 } = cropRef.current;
 
     if (!editing) {
-      // The photo as it is, with the turned crop's outline; outside it dimmed.
+      // The photo as it is, with what the crop cuts off hidden: painted in
+      // the viewer's own background, so the photo simply looks cropped.
       const pts = [
         [x0, y0],
         [x1, y0],
@@ -175,7 +177,7 @@ export default function CropOverlay({ image, width, height, crop, editing, ratio
       ctx.rect(ox, oy, iw, ih);
       pts.forEach(([x, y], i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, ox + x * iw, oy + y * ih));
       ctx.closePath();
-      ctx.fillStyle = DIM;
+      ctx.fillStyle = VIEWER_BACKGROUND;
       ctx.fill("evenodd");
       return;
     }

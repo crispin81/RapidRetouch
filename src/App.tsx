@@ -24,6 +24,7 @@ import {
   Sun,
   Lasso,
   Crop as CropIcon,
+  GripVertical,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -245,8 +246,22 @@ const EYE_SLIDERS: { key: keyof EyesParams; label: string; hint: string; centred
 // "area": a Refine area brush — a tool's area (face, neck, body skin or
 // clothes) shown in blue over the photo, corrected by painting.
 type View = "result" | "before" | "mask" | "compare" | "area";
-type Area = "face" | "neck" | "body" | "clothes";
-const AREA_NAMES: Record<Area, string> = { face: "Face skin", neck: "Neck skin", body: "Body skin", clothes: "Clothes" };
+type Area = "face" | "neck" | "body" | "clothes" | "dodge_burn";
+const AREA_NAMES: Record<Area, string> = {
+  face: "Face skin",
+  neck: "Neck skin",
+  body: "Body skin",
+  clothes: "Clothes",
+  dodge_burn: "Dodge & Burn",
+};
+// Whose tools the blue area is, for the badge while refining it.
+const AREA_TOOLS: Record<Area, string> = {
+  face: "Skin",
+  neck: "Skin",
+  body: "Skin",
+  clothes: "Clothes",
+  dodge_burn: "Dodge & Burn",
+};
 type Step =
   | "removals"
   | "tone"
@@ -668,6 +683,9 @@ export default function App() {
   const [zoomTool, setZoomTool] = useState(false);
   const [zoomLabel, setZoomLabel] = useState("Fit");
   const [detail, setDetail] = useState<Detail | null>(null);
+  // A zoomed-in view's full-resolution detail is being made: until it comes,
+  // the viewer shows the preview enlarged, too soft to show the retouching.
+  const [detailLoading, setDetailLoading] = useState(false);
   const viewerRef = useRef<ViewerHandle>(null);
   // Film strip: every photo opened this session, each with its own settings.
   const [strip, setStrip] = useState<StripItem[]>([]);
@@ -773,6 +791,32 @@ export default function App() {
   const cropRef = useRef(crop);
   const [cropping, setCropping] = useState(false);
   const [cropAspect, setCropAspect] = useState<string>("Free");
+  // Where the crop bar's been dragged to (by its grip), in the viewer; null:
+  // its default place, centred near the top.
+  const [cropBarPos, setCropBarPos] = useState<{ left: number; top: number } | null>(null);
+  const cropBarRef = useRef<HTMLDivElement>(null);
+  const dragCropBar = (e: PointerEvent<HTMLElement>) => {
+    const bar = cropBarRef.current;
+    const area = bar?.offsetParent as HTMLElement | null;
+    if (!bar || !area) return;
+    e.preventDefault();
+    const grip = e.currentTarget;
+    grip.setPointerCapture(e.pointerId);
+    const start = { x: e.clientX, y: e.clientY, left: bar.offsetLeft, top: bar.offsetTop };
+    const move = (ev: globalThis.PointerEvent) => {
+      const left = Math.min(Math.max(0, start.left + ev.clientX - start.x), area.clientWidth - bar.offsetWidth);
+      const top = Math.min(Math.max(0, start.top + ev.clientY - start.y), area.clientHeight - bar.offsetHeight);
+      setCropBarPos({ left, top });
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  };
   const [outdoor, setOutdoor] = useState(false);
   // Photos whose Backdrop/Outdoor mode was set by detection, not by the user
   // (shown as "auto"); any click on the mode buttons makes it the user's.
@@ -1141,9 +1185,16 @@ export default function App() {
   // Keyboard: Ctrl+Z undoes a removal, B toggles the brush, [ and ] resize it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Crop mode: Enter (or Esc) is Done, even straight after using the
+      // Straighten slider, which still has the keyboard's focus.
+      if (image && cropping && (e.key === "Enter" || e.key === "Escape")) {
+        e.preventDefault();
+        setCropping(false);
+        return;
+      }
       if (!image || e.target instanceof HTMLInputElement) return;
       if (cropping) {
-        if (e.key === "Enter" || e.key === "Escape" || e.key === "c" || e.key === "C") {
+        if (e.key === "c" || e.key === "C") {
           e.preventDefault();
           setCropping(false);
         }
@@ -1676,6 +1727,7 @@ export default function App() {
       do {
         detailDirty.current = false;
         const want = wantedRegion.current;
+        setDetailLoading(Boolean(want));
         const args = detailArgsRef.current();
         // Zoom detail waits for the real open rather than forcing one, so
         // scanning while zoomed in stays fast; it's re-asked once opened.
@@ -1692,6 +1744,7 @@ export default function App() {
       handleError(e);
     } finally {
       detailInFlight.current = false;
+      setDetailLoading(false);
     }
   }, [handleError]);
 
@@ -1999,8 +2052,21 @@ export default function App() {
           )}
         </Viewer>
         {view === "before" && <div className="viewer__badge">Original</div>}
+        {detailLoading && !detail && (
+          <div className="viewer__badge viewer__badge--detail">
+            Rendering full detail…
+            <span className="app-footer__busy" />
+          </div>
+        )}
         {cropping && image && (
-          <div className="brushbar cropbar">
+          <div
+            ref={cropBarRef}
+            className="brushbar cropbar"
+            style={cropBarPos ? { left: cropBarPos.left, top: cropBarPos.top, transform: "none" } : undefined}
+          >
+            <span className="cropbar__grip" onPointerDown={dragCropBar} title="Drag to move">
+              <GripVertical size={14} />
+            </span>
             <span className="brushbar__what">Crop</span>
             <label className="brushbar__size" title="Straighten: turn the photo (double-click to reset)">
               Straighten
@@ -2037,7 +2103,7 @@ export default function App() {
             <button onClick={() => updateCrop(NO_CROP)} title="Back to the whole photo, unturned">
               <RotateCcw size={14} /> Reset
             </button>
-            <button className="brushbar__done" onClick={() => setCropping(false)} title="Enter">
+            <button className="brushbar__done" onClick={() => setCropping(false)} title="Done (Enter)">
               Done
             </button>
           </div>
@@ -2082,7 +2148,7 @@ export default function App() {
         )}
         {view === "area" && area && (
           <div className="viewer__badge viewer__badge--low">
-            {AREA_NAMES[area]} · blue is what the {area === "clothes" ? "Clothes" : "Skin"} tools work on ·
+            {AREA_NAMES[area]} · blue is what the {AREA_TOOLS[area]} tools work on ·
             painting {areaMode === "add" ? "it in" : "it out"}
           </div>
         )}
@@ -2582,6 +2648,14 @@ export default function App() {
                 title="Hold to see the photo without dodge & burn"
               >
                 <Eye size={15} /> Hold for before
+              </button>
+              <button
+                disabled={!image || view === "mask"}
+                className={view === "area" && area === "dodge_burn" ? "active" : ""}
+                onClick={() => showArea("dodge_burn")}
+                title="Show and correct where Dodge & Burn works"
+              >
+                <Layers size={15} /> Refine area
               </button>
             </div>
             <p className="panel__model">
