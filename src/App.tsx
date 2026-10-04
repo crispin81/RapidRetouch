@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
   FolderOpen,
@@ -103,8 +102,7 @@ const LINKS_TIMEOUT_MS = 5000;
 const TUTORIAL_URL_KEY = "rapidretouch.tutorialUrl";
 const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
 const EXPORT_FORMAT_KEY = "rapidretouch.exportFormat";
-// About opens by itself on the first launch and after each update (the
-// version it was last shown for), then only from its button.
+
 /** Bring the window to the front (after the first-launch setup, when About
  * opens by itself), or where the system won't allow that (Windows sometimes),
  * flash it in the taskbar / bounce it in the Dock. */
@@ -120,7 +118,6 @@ function bringToFront(): void {
   }).catch(() => undefined);
 }
 
-const ABOUT_SEEN_KEY = "rapidretouch.aboutSeenVersion";
 const EXPORT_SIZE_KEY = "rapidretouch.exportSize";
 
 const PREVIEW_EDGE = 2048; // keep in sync with the engine's server.PREVIEW_EDGE
@@ -809,8 +806,11 @@ export default function App() {
       } else if (e.event === "setup") {
         if (e.error) setSetup({ message: "", fraction: null, error: e.error });
         else if (e.fraction === 1) {
+          // The engine was just set up: a first launch or an update. About
+          // opens by itself then (and only then), in front: the long first
+          // download may have left the window behind others.
           setSetup(null);
-          bringToFront(); // the long first download may have left it behind other windows
+          showAbout().then(() => bringToFront());
         }
         else setSetup({ message: e.message ?? "", fraction: e.fraction ?? null, error: null });
       } else if (e.event === "written") {
@@ -1385,32 +1385,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    getVersion()
-      .then((version) => {
-        let seen: string | null = null;
-        try {
-          seen = localStorage.getItem(ABOUT_SEEN_KEY);
-        } catch {
-          // storage unavailable: show it, as on a first launch
-        }
-        if (seen === version) return;
-        // Counted as seen only once it has actually opened (not when the
-        // engine couldn't start, say).
-        showAbout().then((shown) => {
-          if (!shown) return;
-          bringToFront();
-          try {
-            localStorage.setItem(ABOUT_SEEN_KEY, version);
-          } catch {
-            // only a convenience
-          }
-        });
-      })
-      .catch(() => undefined);
-    // Once, at start-up.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const copySettings = () => {
     setCopied(currentSettings());

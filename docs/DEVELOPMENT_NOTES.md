@@ -418,3 +418,8 @@ GPU matters.
 | 4fed7cd | Acne rebuild, crop & straighten, batch export, Temperature/Tint/Vibrance, iris & lip hue |
 | a071e5c | Speed work (area-only zoom, parallel tone/grain), iris hue ×2, colour edges, crop flicker |
 | f270f4e | Blemishes back, Pores, panel Opacity, beard-safe dodge & burn, nose in skin map, Refine area fix |
+
+**About splash (2026-10-04):** About opens by itself when the first-launch setup has just run, which
+means a first install or an update (the setup marker is per version), then only from its button. A
+localStorage "seen version" flag was tried first: it lived in the web engine's storage (on a Mac
+`~/Library/WebKit/<id>`), so it outlived deleting the app's data and the splash never came back.
