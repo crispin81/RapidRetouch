@@ -69,3 +69,26 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
+
+  # Copies of the main installers under names without a version number, so
+  # https://github.com/crispin81/RapidRetouch/releases/latest/download/<name>
+  # always serves the newest published release (the website links to these).
+  stable-names:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: upload version-free copies
+        run: |
+          mkdir out && cd out
+          gh release download "$TAG" -p '*_amd64.AppImage' -p '*_aarch64.dmg' -p '*_x64_en-US.msi' -p '*_x64-setup.exe'
+          mv *_amd64.AppImage RapidRetouch_linux_x86_64.AppImage
+          mv *_aarch64.dmg RapidRetouch_mac_apple_silicon.dmg
+          mv *_x64_en-US.msi RapidRetouch_windows_x64.msi
+          mv *_x64-setup.exe RapidRetouch_windows_x64_setup.exe
+          gh release upload "$TAG" --clobber *
