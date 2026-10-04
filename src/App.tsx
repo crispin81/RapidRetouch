@@ -777,10 +777,20 @@ export default function App() {
   // Photos whose Backdrop/Outdoor mode was set by detection, not by the user
   // (shown as "auto"); any click on the mode buttons makes it the user's.
   const autoMode = useRef(new Set<string>());
+  // Photos whose studio/outdoor detection has come in. Until it has, a photo
+  // whose mode isn't the user's choice gets no backdrop work (see backdropArg):
+  // clicked too soon, an outdoor shot was smoothed as a backdrop, then put back.
+  const detectedScene = useRef(new Set<string>());
+  const modeUnknown = (path: string) =>
+    !detectedScene.current.has(path) && (autoMode.current.has(path) || !settingsByPath.current.has(path));
   const [modeIsAuto, setModeIsAuto] = useState(false);
   const outdoorRef = useRef(outdoor);
   /** Backdrop settings to send: none when the photo is set to Outdoor. */
-  const backdropArg = () => backdropLook(outdoorRef.current, paramsRef.current);
+  const backdropArg = () => {
+    const path = activePath.current;
+    if (path && modeUnknown(path)) return null; // studio or outdoor? not known yet
+    return backdropLook(outdoorRef.current, paramsRef.current);
+  };
   const inFlight = useRef(false);
   const dirty = useRef(false);
 
@@ -980,7 +990,13 @@ export default function App() {
 
   // Reset buttons beside each group's heading.
   const toggleOutdoor = () => {
-    if (activePath.current) autoMode.current.delete(activePath.current);
+    const path = activePath.current;
+    if (path) {
+      // The user's choice: a detection still to come mustn't override it, and
+      // the backdrop needn't wait for it.
+      autoMode.current.delete(path);
+      detectedScene.current.add(path);
+    }
     setModeIsAuto(false);
     const next = !outdoorRef.current;
     outdoorRef.current = next;
@@ -1320,16 +1336,22 @@ export default function App() {
 
   /** Set Backdrop/Outdoor from detection, for a photo the user hasn't set up. */
   const applyDetectedScene = (path: string, detected: "backdrop" | "outdoor") => {
+    const wasUnknown = modeUnknown(path);
+    // Chosen by hand before the detection came in: keep the choice.
+    if (detectedScene.current.has(path) && !autoMode.current.has(path)) return;
+    detectedScene.current.add(path);
     if (settingsByPath.current.has(path) && !autoMode.current.has(path)) return;
     const wantOutdoor = detected === "outdoor";
     autoMode.current.add(path);
     if (activePath.current === path) {
       setModeIsAuto(true);
-      if (outdoorRef.current !== wantOutdoor) {
+      const changed = outdoorRef.current !== wantOutdoor;
+      if (changed) {
         outdoorRef.current = wantOutdoor;
         setOutdoor(wantOutdoor);
-        if (openedPath.current === path) render();
       }
+      // Rendered without its backdrop while the mode was unknown: now with it.
+      if ((changed || wasUnknown) && openedPath.current === path) render();
     } else {
       const st = settingsByPath.current.get(path) ?? ALL_DEFAULTS;
       settingsByPath.current.set(path, { ...st, outdoor: wantOutdoor });
