@@ -170,7 +170,11 @@ class Engine:
 
         return {
             "cuda": torch.cuda.is_available(),
-            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+            "device": torch.cuda.get_device_name(0)
+            if torch.cuda.is_available()
+            else "Apple GPU"
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+            else "CPU",
         }
 
     def models(self) -> list[dict]:

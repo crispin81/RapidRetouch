@@ -123,8 +123,7 @@ def fetch_url(manifest: "Manifest", status=lambda msg: None) -> Path:
 
 def prefetch(manifest: "Manifest", status=lambda msg: None) -> None:
     """Download a model's files now (first-launch setup) rather than the first
-    time a tool needs it. Hugging Face models go to its own cache, where
-    loading them later finds them."""
+    time a tool needs it, into the same models folder they're loaded from."""
     kind = manifest.source.get("kind")
     if kind == "url":
         fetch_url(manifest, status)
@@ -134,8 +133,24 @@ def prefetch(manifest: "Manifest", status=lambda msg: None) -> None:
         snapshot_download(
             manifest.source["repo"],
             revision=manifest.source["revision"],
+            cache_dir=models_dir(),  # where the adapter loads it from
             allow_patterns=["*.py", "*.json", "*.safetensors", "*.txt"],
         )
+
+
+def best_device() -> str:
+    """Where models run: an NVIDIA GPU ("cuda"), else a Mac's GPU ("mps"),
+    else the CPU. RAPIDRETOUCH_DEVICE overrides it (for testing)."""
+    forced = os.environ.get("RAPIDRETOUCH_DEVICE")
+    if forced:
+        return forced
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class Registry:
@@ -172,7 +187,7 @@ class Registry:
         except FileNotFoundError:
             return set()
 
-    def get(self, model_id: str, device: str = "cuda"):
+    def get(self, model_id: str, device: str | None = None):
         """Return a loaded adapter instance, downloading weights on first use."""
         if model_id in self._loaded:
             return self._loaded[model_id]
@@ -182,6 +197,6 @@ class Registry:
         module = importlib.import_module(f"rapidretouch_engine.adapters.{manifest.adapter}")
         if manifest.source.get("kind") == "url":
             fetch_url(manifest, self.status)
-        instance = module.Adapter(manifest, models_dir(), device)
+        instance = module.Adapter(manifest, models_dir(), device or best_device())
         self._loaded[model_id] = instance
         return instance

@@ -8,6 +8,8 @@ import os
 # place, so memory freed after a run can actually be reused, and returned to
 # other apps sharing the card, instead of stranding in fragments.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# On a Mac's GPU, run any operation it lacks on the CPU instead of failing.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import argparse
 import json

@@ -26,7 +26,23 @@ class Adapter:
             trust_remote_code=True,
             cache_dir=models_dir,
         )
-        self.model.to(device).eval().half()
+        self.model.eval()
+        self._place(device)
+
+    def _place(self, device: str) -> None:
+        """On a GPU in half precision; on the CPU in float32 (half is poorly
+        supported there). A GPU that can't take it (a Mac's, missing an op)
+        leaves it on the CPU."""
+        try:
+            if device == "cpu":
+                self.model.to("cpu").float()
+            else:
+                self.model.to(device).half()
+            self.device = device
+        except Exception as e:  # noqa: BLE001
+            print(f"birefnet: can't use {device} ({e}); using the CPU", file=sys.stderr)
+            self.model.to("cpu").float()
+            self.device = "cpu"
 
     def predict(self, rgb: np.ndarray) -> np.ndarray:
         """rgb: float32 HxWx3 in 0..1. Returns a soft alpha, float32 HxW, 1 = subject.
@@ -40,7 +56,15 @@ class Adapter:
         x = torch.from_numpy(small).permute(2, 0, 1)[None]
         x = (x - IMAGENET_MEAN) / IMAGENET_STD
         try:
-            pred = self._run(x)
+            try:
+                pred = self._run(x)
+            except (RuntimeError, NotImplementedError) as e:
+                if self.device == "cpu" or isinstance(e, torch.OutOfMemoryError):
+                    raise
+                # A GPU without some op (a Mac's): the CPU from now on.
+                print(f"birefnet: {self.device} failed ({e}); using the CPU", file=sys.stderr)
+                self._place("cpu")
+                pred = self._run(x)
         except torch.OutOfMemoryError:
             _free_gpu()
             try:
@@ -55,7 +79,8 @@ class Adapter:
 
     @torch.inference_mode()
     def _run(self, x: torch.Tensor) -> np.ndarray:
-        out = self.model(x.to(self.device).half())[-1]
+        x = x.to(self.device)
+        out = self.model(x.float() if self.device == "cpu" else x.half())[-1]
         return out.sigmoid()[0, 0].float().cpu().numpy()
 
     @torch.inference_mode()
@@ -65,7 +90,7 @@ class Adapter:
         try:
             return self.model(x.float())[-1].sigmoid()[0, 0].numpy()
         finally:
-            self.model.to(self.device).half()
+            self._place(self.device)
 
 
 def _free_gpu() -> None:

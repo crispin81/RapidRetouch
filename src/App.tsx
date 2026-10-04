@@ -835,7 +835,7 @@ export default function App() {
       .then((r) => {
         setEngineReady(true);
         call<Preset[]>("presets").then(setPresets).catch(() => undefined);
-        setStatus(r.cuda ? `Ready · ${r.device}` : "Ready · no GPU found, running on CPU (slow)");
+        setStatus(r.device !== "CPU" ? `Ready · ${r.device}` : "Ready · no GPU found, running on CPU (slower)");
       })
       .catch((e) => setError(`The engine didn't start: ${errorMessage(e)}`));
     return () => {
