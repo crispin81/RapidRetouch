@@ -39,5 +39,6 @@ def test_acne_slider_takes_clearer_spots_first():
     assert skin.acne_spots(lab, W, 600.0, 1.0).max() > 0.5  # high: fainter ones too
 
 
-def test_old_blemishes_setting_loads_as_acne():
-    assert skin.RegionParams.from_dict({"blemishes": 0.6}).acne == 0.6
+def test_blemishes_is_its_own_slider():
+    p = skin.RegionParams.from_dict({"blemishes": 0.6})
+    assert p.blemishes == 0.6 and p.acne == 0 and not p.is_noop()

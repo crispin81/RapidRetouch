@@ -60,6 +60,8 @@ WORK_FW = 400  # px: the light map is smooth, so it's worked out at this size
 # detail, but only this close (face widths) to that hair, so forehead lines,
 # which look much the same, are still dodged.
 HAIR_SOFT = 0.01
+BEARD_KEEP = 0.85  # share of the change kept off facial hair
+BEARD_SOFT = 0.03  # face widths: how gradually that fades in from the cheeks
 STRANDS_NEAR_HAIR = 0.08
 STRANDS_PAD = 0.01  # face widths of context around where strands are traced
 
@@ -200,6 +202,12 @@ def apply(rgb: np.ndarray, faces: list[np.ndarray], p: Params, head_hair: np.nda
         keep_off = np.maximum(keep_off, _poly_mask(sh, slm[LIPS]))
         keep_off = np.clip(blur(grow_mask(keep_off, 2 * round(KEEP_OFF_MARGIN * sfw) + 1), KEEP_OFF_FADE * sfw) * 1.5, 0, 1)
         weight = region * (1 - keep_off)
+        # Facial hair is left as it is: burning darkened and dodging greyed a
+        # beard, and Highlights/Shadows strengthened its own light and shade
+        # ~2.4x as much as skin's. Faded over a wide, soft edge: following the
+        # stubble map's patchy edge drew it into the result as lines.
+        beard = np.clip(blur(hair, max(0.7, BEARD_SOFT * sfw)) * 1.3, 0, 1)
+        weight = weight * (1 - BEARD_KEEP * beard)
         if on_hair is not None:
             weight = weight * (1 - on_hair)
 

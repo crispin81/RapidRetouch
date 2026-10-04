@@ -4,7 +4,7 @@ What we decided, why, what was tried and rejected, and what's next, so the proje
 be picked up without the conversations it came from. The original brief is
 [RETOUCH_APP_BRIEF.md](../RETOUCH_APP_BRIEF.md); where they differ, this file is newer.
 
-Last updated: 2026-10-03.
+Last updated: 2026-10-04.
 
 ---
 
@@ -132,6 +132,24 @@ clears it.
   - Tested on DSCF7253 (chin spot).
 - **Texture** reduces pores in a band (0.0015–0.015 face widths) and keeps the finest grain
   and highlights. It keeps hair strands (`_strands`) and is 25% stronger on the chin.
+- **Pores** (added 2026-10-04 for strongly textured skin, DSC_2376-2) is stronger than Texture.
+  - It flattens the 0.0007–0.015 fw band, raised bumps included, even in highlights. Texture
+    spares bright detail, which left lit bumps untouched.
+  - The "skin around" is a half-size 8-bit median: it ignores contrasty bumps (crêpey skin
+    beside the nose) yet keeps edges. A blur made halos at the nose outline; the guided
+    filter took the bumps for edges.
+  - It works over the whole-face map, so it reaches the nose sides and smile crease.
+  - Detail above 10–20 L is kept as an edge.
+  - Strands are protected only near the parts-model hair, because crêpe lines look like
+    hairs.
+  - About 0.6 looks natural; full strength looks airbrushed.
+- **Blemishes** (the pre-Acne heal) is back as its own slider next to Acne (2026-10-04). It
+  catches large pores and small marks. Old presets' `blemishes` load into Blemishes again.
+- **Nose in the skin map** (2026-10-04): within a feathered landmark nose area (`NOSE_AREA`),
+  the colour-tested map takes the whole-face map's value. Full coverage went 17% → 65% on
+  P1167822's red nose and 63% → 82% on DSC_2376-2.
+- An underexposed photo is *not* why skin tools look weak. Retouching on a brightened copy
+  was tried and measured no different, so it was removed.
 - **Moles are kept** by default (strong, round, brown not red).
 - Wrinkle zones: forehead, frown, smile (+ cheek lines for older subjects), chin, neck. A
   Hessian line detector fills lines by closing, and deep smile folds are only softened.
@@ -151,6 +169,8 @@ across the forehead:
 - Applied in linear light.
 - Keeps off hair (parts map) and single strands near the hairline (strand tracing is
   limited to there, because forehead lines look the same).
+- Fades 85% over facial hair (the stubble map blurred over 0.03 fw, so its patchy edge
+  draws no line). P1167822's beard change went 7.7 → 1.6 with skin kept at about 3.0.
 
 **Eyes** (`eyes.py`)
 - Landmarks come from two passes: detect at 2048, then refine each face on a full-res
@@ -193,6 +213,16 @@ protected by line coverage. The panel note says to use Patch for real removal.
   - Skin hues are protected and dull colours gain most.
   - At full: ×1.69 (Chris asked for +25%, then settled on +15%).
 - The curve changes Lab L only, never colour.
+
+**Panel Opacity** (2026-10-04): Skin, Dodge & Burn, Eyes and Mouth each have an Opacity
+(`look.opacity`), shown as a gold outline round the panel with the control on its top edge
+(MangoPrint Prepress's "Apply edits to" style, `OpacityGroup.tsx`).
+- It blends the stage's result toward its input, like a layer.
+- `_staged` caches the unblended result under a key without opacity, so dragging only
+  re-blends (~0.02 s).
+- At 0% the stage is skipped.
+- It's included in presets and copy/paste and recorded in exports.
+- Not on Tone or Backdrop (Backdrop has Strength), at Chris's request.
 
 **Remove** (`inpaint.py`, `patch.py`, `reflection.py`): LaMa per context crop; Patch is a
 frequency-separated heal; Glasses reflections is a least-squares tint split, still labelled
@@ -284,6 +314,12 @@ GPU matters.
 - `mediapipe<1` is required: 1.0.1 is SIGKILLed creating the landmarker. mediapipe pulls in
   opencv-contrib, which is overridden in pyproject. If cv2 vanishes:
   `uv sync --reinstall-package opencv-python-headless`.
+- Scripts that create several `Engine`s can deadlock: a garbage-collected MediaPipe
+  FaceLandmarker's `__del__` waits on the dispatcher during another detect. The app keeps one
+  engine and the registry keeps models loaded, so it's not affected. Reuse one Engine in
+  scripts.
+- After any engine change, restart the app. The UI hot-reloads, but the engine doesn't, so
+  a new slider can look present while being ignored.
 - GTK file dialog filters are case-sensitive: list both `.RW2` and `.rw2`.
 - RAW: neutral develop (camera WB, sRGB, 16-bit, no auto-bright; auto-bright clips white
   backdrops). Thumbnails use the same develop at half size, so colours don't jump on open.
@@ -340,3 +376,4 @@ GPU matters.
 | 13f3c43 | 16-bit TIFF export, About page, coffee note, social links |
 | 4fed7cd | Acne rebuild, crop & straighten, batch export, Temperature/Tint/Vibrance, iris & lip hue |
 | a071e5c | Speed work (area-only zoom, parallel tone/grain), iris hue ×2, colour edges, crop flicker |
+| (next) | Blemishes back, Pores, panel Opacity, beard-safe dodge & burn, nose in skin map, Refine area fix |

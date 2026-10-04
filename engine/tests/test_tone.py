@@ -60,3 +60,4 @@ def test_white_balance_warms_cools_and_tints_without_changing_brightness():
     assert magenta[1] < magenta[0] and magenta[1] < magenta[2]
     Y = lambda rgb: float(srgb_to_linear(rgb) @ np.array([0.2126, 0.7152, 0.0722]))
     assert abs(Y(warm) - Y(grey[0, 0])) < 0.01 and abs(Y(magenta) - Y(grey[0, 0])) < 0.01
+

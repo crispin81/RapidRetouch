@@ -42,8 +42,8 @@ EXPORT_BIT_DEPTH = 16  # every export is a 16-bit TIFF
 ZOOM_SPARE = 0.25
 ZOOM_TILES = 4
 FACE_WINDOW_MARGIN = 0.5  # face widths around the face outline: every face tool works within it
-FACE_WINDOW_CACHE_SIZE = 8
-STAGE_CACHE_SIZE = 8  # preview stages kept: the current look's, plus a before view's
+FACE_WINDOW_CACHE_SIZE = 10
+STAGE_CACHE_SIZE = 12  # preview stages kept: the current look's, plus a before view's
 METHODS = {
     "ping",
     "models",
@@ -333,7 +333,7 @@ class Engine:
         h, w = rgb.shape[:2]
         found_key = (self.edit_version, self.mask_version)
         if region == "face":
-            return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"])
+            return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"], self._part("hair"))
         self._ensure_mask()
         if region == "clothes":
             self._creases(rgb, self.alpha_preview, 0.0, self._preview_cache, found_key)
@@ -397,6 +397,9 @@ class Engine:
         "clothes": None,  # {"creases": 0..1}
         "dodge_burn": None,  # {"contour", "highlights", "shadows": 0..1}
         "tone": None,  # {"ev": stops, "curves": {...}}: the final grade
+        # Each face panel's overall amount (0..1): its result blended back
+        # toward the photo before it, like a layer's opacity.
+        "opacity": None,  # {"skin", "dodge_burn", "eyes", "mouth": 0..1}
     }
 
     def _look(self, look: dict) -> dict:
@@ -584,6 +587,8 @@ class Engine:
         the whole of it. Faces, the hair map and area edits are moved into the
         box's coordinates; Neck & Body aren't available."""
         landmarks = lambda: [self.registry.default_for("face_landmarks").provenance()]  # noqa: E731
+        opacities = look.get("opacity") or {}
+        opacity = lambda group: float(np.clip(opacities.get(group, 1.0), 0, 1))  # noqa: E731
         if frame is None:
             faces = self._ensure_faces
             hair = lambda: self._part("hair")  # noqa: E731
@@ -596,7 +601,7 @@ class Engine:
         stages = []
         skin = look["skin"] or {}
         face_p = skin_tool.RegionParams.from_dict(skin.get("face"))
-        if not face_p.is_noop():
+        if not face_p.is_noop() and opacity("skin") > 0:
             face_edits = list(self.region_edits["face"])
 
             def run(rgb, steps):
@@ -610,10 +615,10 @@ class Engine:
                     steps.append({"tool": "skin", "face": asdict(face_p), "area_edits": face_edits,
                                   "faces": len(self.faces), "models": landmarks()})
                 return rgb
-            stages.append(("skin", {"params": asdict(face_p), "edits": face_edits}, run))
+            stages.append(("skin", {"params": asdict(face_p), "edits": face_edits, "opacity": opacity("skin")}, run))
         neck_p = skin_tool.RegionParams.from_dict(skin.get("neck"))
         body_p = skin_tool.RegionParams.from_dict(skin.get("body"))
-        if frame is None and not (neck_p.is_noop() and body_p.is_noop()):
+        if frame is None and not (neck_p.is_noop() and body_p.is_noop()) and opacity("skin") > 0:
             body_edits = {r: list(self.region_edits[r]) for r in ("neck", "body")}
 
             def run(rgb, steps):
@@ -628,38 +633,43 @@ class Engine:
                         "models": [self.registry.manifests[self.mask_model].provenance(), *landmarks()],
                     })
                 return rgb
-            stages.append(("skin_body", {"neck": asdict(neck_p), "body": asdict(body_p), "edits": body_edits}, run))
+            stages.append(("skin_body", {"neck": asdict(neck_p), "body": asdict(body_p), "edits": body_edits,
+                                         "opacity": opacity("skin")}, run))
         db_p = dodge_burn.Params.from_dict(look["dodge_burn"])
-        if not db_p.is_noop():
+        if not db_p.is_noop() and opacity("dodge_burn") > 0:
             def run(rgb, steps):
                 rgb = dodge_burn.apply(rgb, faces(), db_p, hair())
                 if steps is not None:
                     steps.append({"tool": "dodge_burn", "params": asdict(db_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
-            stages.append(("dodge_burn", asdict(db_p), run))
+            stages.append(("dodge_burn", {**asdict(db_p), "opacity": opacity("dodge_burn")}, run))
         eyes_p = eye_tool.Params.from_dict(look["eyes"] or {})
-        if look["eyes"] is not None and not eyes_p.is_noop():
+        if look["eyes"] is not None and not eyes_p.is_noop() and opacity("eyes") > 0:
             def run(rgb, steps):
                 rgb = eye_tool.apply(rgb, faces(), eyes_p)
                 if steps is not None:
                     steps.append({"tool": "eyes", "params": asdict(eyes_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
-            stages.append(("eyes", asdict(eyes_p), run))
+            stages.append(("eyes", {**asdict(eyes_p), "opacity": opacity("eyes")}, run))
         mouth_p = mouth_tool.Params.from_dict(look["mouth"])
-        if look["mouth"] is not None and not mouth_p.is_noop():
+        if look["mouth"] is not None and not mouth_p.is_noop() and opacity("mouth") > 0:
             def run(rgb, steps):
                 rgb = mouth_tool.apply(rgb, faces(), mouth_p)
                 if steps is not None:
                     steps.append({"tool": "mouth", "params": asdict(mouth_p), "faces": len(self.faces), "models": landmarks()})
                 return rgb
-            stages.append(("mouth", asdict(mouth_p), run))
+            stages.append(("mouth", {**asdict(mouth_p), "opacity": opacity("mouth")}, run))
         return stages
 
     def _face_tools(self, rgb: np.ndarray, look: dict, people, steps: list[dict] | None = None) -> np.ndarray:
         """Every face and body tool this look uses, in order, uncached (the
         full-resolution pipeline)."""
-        for _name, _settings, run in self._face_stages(look, people):
-            rgb = run(rgb, steps)
+        for _name, settings, run in self._face_stages(look, people):
+            op = settings.get("opacity", 1.0)
+            out = run(rgb, steps)
+            if op < 1 and steps:
+                steps[-1]["opacity"] = op
+            rgb = _blend(rgb, out, op)
         return rgb
 
     def _staged(self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE) -> np.ndarray:
@@ -669,24 +679,45 @@ class Engine:
         only that tool and the ones after it."""
         if cache is None:
             cache = self._stage_cache
-        keys, key = [], base_key
+        # A stage's opacity only blends its own result with its input, so its
+        # unblended result is kept under a key without it: moving an Opacity
+        # slider only re-blends.
+        entries, key = [], base_key
         for name, settings, _run in stages:
-            key = json.dumps([key, name, settings], sort_keys=True)
-            keys.append(key)
+            op = float(settings.get("opacity", 1.0))
+            plain = {k: v for k, v in settings.items() if k != "opacity"}
+            raw_key = json.dumps([key, name, plain], sort_keys=True)
+            key = raw_key if op >= 1 else json.dumps([raw_key, op])
+            entries.append((raw_key, key, op))
+
+        def take(k):
+            hit = cache.pop(k, None)
+            if hit is not None:
+                cache[k] = hit  # most recently used
+            return hit
+
+        def keep(k, value):
+            cache[k] = value
+            while len(cache) > size:
+                cache.pop(next(iter(cache)))
+
         start, img = 0, None
         for i in range(len(stages) - 1, -1, -1):
-            hit = cache.pop(keys[i], None)
+            hit = take(entries[i][1])
             if hit is not None:
-                cache[keys[i]] = hit  # most recently used
                 start, img = i + 1, hit
                 break
         if img is None:
             img = rgb()
         for i in range(start, len(stages)):
-            img = stages[i][2](img, None)
-            cache[keys[i]] = img
-            while len(cache) > size:
-                cache.pop(next(iter(cache)))
+            raw_key, key, op = entries[i]
+            raw = take(raw_key) if op < 1 else None
+            if raw is None:
+                raw = stages[i][2](img, None)
+                keep(raw_key, raw)
+            img = _blend(img, raw, op)
+            if op < 1:
+                keep(key, img)
         return img
 
     def _render(self, look: dict) -> np.ndarray:
@@ -1059,6 +1090,13 @@ EXPORT_STEP = 0.3
 EXPORT_WRITING = 0.9
 
 BACKGROUND = {"thumbnail"}  # methods that touch no engine state
+
+
+def _blend(before: np.ndarray, after: np.ndarray, opacity: float) -> np.ndarray:
+    """``after`` at ``opacity`` over ``before``, as a layer's opacity."""
+    if opacity >= 1:
+        return after
+    return before + np.float32(opacity) * (after - before)
 
 
 def _frame_faces(faces: list[np.ndarray], box, full_shape) -> list[np.ndarray]:

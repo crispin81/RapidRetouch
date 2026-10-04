@@ -1336,3 +1336,79 @@ button.primary {
   font-size: 12px;
   color: #c9cad3;
 }
+
+/* A panel's Opacity: a gold outline round all its options, with the control
+   sitting on the top edge (as MangoPrint Prepress's "Apply edits to"). */
+.opacity-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border: 1.5px solid #ffcc33;
+  border-radius: 8px;
+  padding: 22px 10px 12px;
+  margin-top: 10px;
+}
+
+.opacity-group__control {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  background: #1b1c22;
+  border: 1.5px solid #ffcc33;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.opacity-group__label {
+  color: #ffcc33;
+  font-weight: 600;
+}
+
+.opacity-group__value {
+  min-width: 32px;
+  text-align: right;
+  color: #b7b8c2;
+  font-variant-numeric: tabular-nums;
+}
+
+.opacity-group__control input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 96px;
+  height: 4px;
+  margin: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.opacity-group__control input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+.opacity-group__control input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+.opacity-group__control input[type="range"]:disabled {
+  cursor: default;
+  opacity: 0.5;
+}

@@ -54,11 +54,13 @@ export interface EyesParams {
 }
 
 export interface SkinRegion {
-  acne: number; // spots and acne healed (was blemishes)
+  acne: number; // spots and acne healed
+  blemishes: number; // large pores and small marks evened out
   smooth: number;
   even: number;
   shine: number; // -1 matte .. 0 natural .. +1 gloss
   texture: number; // pore softening
+  pores: number; // pores taken out, pits and bumps alike
   // Wrinkles group (Face tab only)
   forehead_lines: number;
   frown_lines: number;

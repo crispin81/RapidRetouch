@@ -40,6 +40,7 @@ import {
 import About from "./About";
 import ExportDialog, { ExportFormat, ExportRow } from "./ExportDialog";
 import BrushBar from "./BrushBar";
+import OpacityGroup from "./OpacityGroup";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
 import CropOverlay, { Crop, NO_CROP, cropToRatio, fitCrop, isNoCrop } from "./CropOverlay";
@@ -60,7 +61,17 @@ interface PhotoSettings {
   creases: number; // clothes crease smoothing 0..1
   tone: Tone;
   crop: Crop; // straighten and crop, applied at export; not part of presets
+  opacity: Opacity; // each face panel's overall amount
 }
+/** Each face panel's overall amount (0..1): its whole result faded toward the
+ * photo before it, like a layer's opacity. */
+interface Opacity {
+  skin: number;
+  dodge_burn: number;
+  eyes: number;
+  mouth: number;
+}
+const OPACITY_DEFAULTS: Opacity = { skin: 1, dodge_burn: 1, eyes: 1, mouth: 1 };
 interface Tone {
   temperature: number; // -1 bluer .. +1 warmer
   tint: number; // -1 greener .. +1 more magenta
@@ -273,10 +284,12 @@ const DODGE_BURN_SLIDERS: { key: keyof DodgeBurnParams; label: string; hint: str
 ];
 const SKIN_REGION_DEFAULTS: SkinRegion = {
   acne: 0,
+  blemishes: 0,
   smooth: 0,
   even: 0,
   shine: 0,
   texture: 0,
+  pores: 0,
   forehead_lines: 0,
   frown_lines: 0,
   smile_lines: 0,
@@ -345,6 +358,7 @@ const ALL_DEFAULTS: PhotoSettings = {
   creases: 0,
   tone: TONE_DEFAULTS,
   crop: NO_CROP,
+  opacity: OPACITY_DEFAULTS,
 };
 /** A preset's settings as full PhotoSettings: anything the preset doesn't have
  * (a slider added since it was saved) takes its default. */
@@ -352,13 +366,8 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean, crop: Crop
   const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
   const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
   const skin = obj(saved.skin);
-  // A skin region, with Blemishes (before the Acne rebuild) carried over to Acne.
-  const region = (defaults: SkinRegion, savedRegion: unknown): SkinRegion => {
-    const { blemishes, ...rest } = obj(savedRegion);
-    const merged = { ...defaults, ...rest } as SkinRegion;
-    if (typeof blemishes === "number" && !("acne" in rest)) merged.acne = blemishes;
-    return merged;
-  };
+  const region = (defaults: SkinRegion, savedRegion: unknown): SkinRegion =>
+    ({ ...defaults, ...obj(savedRegion) }) as SkinRegion;
   const tone = obj(saved.tone);
   return {
     backdrop: { ...ALL_DEFAULTS.backdrop, ...obj(saved.backdrop) },
@@ -385,6 +394,7 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean, crop: Crop
       curve: Array.isArray(tone.curve) ? (tone.curve as Point[]) : IDENTITY,
     },
     crop,
+    opacity: { ...OPACITY_DEFAULTS, ...(obj(saved.opacity) as Partial<Opacity>) },
   };
 }
 
@@ -403,7 +413,13 @@ const SKIN_SLIDERS: {
   {
     key: "acne",
     label: "Acne",
-    hint: "Heal spots, acne and small marks: low takes only the clearest, high fainter ones too. Moles and pores are kept",
+    hint: "Heal spots and acne: low takes only the clearest, high fainter ones too. Moles and pores are kept",
+    min: 0,
+  },
+  {
+    key: "blemishes",
+    label: "Blemishes",
+    hint: "Even out large pores and small marks, each to the skin around it; the finest texture is kept. Moles are kept",
     min: 0,
   },
   { key: "smooth", label: "Smooth", hint: "Even out blotchy light and shade; pores and fine texture are kept", min: 0 },
@@ -411,6 +427,12 @@ const SKIN_SLIDERS: {
     key: "texture",
     label: "Texture",
     hint: "Soften pores, most visible ones most; the skin's finest grain is kept so it never looks plastic",
+    min: 0,
+  },
+  {
+    key: "pores",
+    label: "Pores",
+    hint: "Take pores out, pits and raised bumps alike, even where they catch the light; the finest grain is kept. Stronger than Texture",
     min: 0,
   },
   {
@@ -639,6 +661,8 @@ export default function App() {
   const creasesRef = useRef(creases);
   const toneRef = useRef(toneParams);
   const [crop, setCrop] = useState<Crop>(NO_CROP);
+  const [opacity, setOpacity] = useState<Opacity>(OPACITY_DEFAULTS);
+  const opacityRef = useRef(opacity);
   // Iris hue's colour bar for the open photo's eyes (null: the blue-eye default).
   const [irisScale, setIrisScale] = useState<string[] | null>(null);
   const irisScaleFor = useRef<string | null>(null);
@@ -678,6 +702,7 @@ export default function App() {
     dodge_burn: sameValues(dodgeBurnRef.current, DODGE_BURN_DEFAULTS) ? null : dodgeBurnRef.current,
     clothes: creasesRef.current > 0 ? { creases: creasesRef.current } : null,
     tone: sameValues(toneRef.current, TONE_DEFAULTS) ? null : toneRef.current,
+    opacity: opacityRef.current,
   });
   /** The same, for any photo's settings (batch export). */
   const lookArgsFor = (st: PhotoSettings): Record<string, unknown> => ({
@@ -688,6 +713,7 @@ export default function App() {
     dodge_burn: sameValues(st.dodgeBurn, DODGE_BURN_DEFAULTS) ? null : st.dodgeBurn,
     clothes: st.creases > 0 ? { creases: st.creases } : null,
     tone: sameValues(st.tone, TONE_DEFAULTS) ? null : st.tone,
+    opacity: st.opacity,
   });
 
   useEffect(() => {
@@ -857,9 +883,16 @@ export default function App() {
     setParams(DEFAULTS);
     render();
   };
+  const updateOpacity = (group: keyof Opacity, value: number, rerender = true) => {
+    const next = { ...opacityRef.current, [group]: value };
+    opacityRef.current = next;
+    setOpacity(next);
+    if (rerender) render();
+  };
   const resetSkin = () => {
     skinRef.current = SKIN_DEFAULTS;
     setSkinParams(SKIN_DEFAULTS);
+    updateOpacity("skin", 1, false);
     render();
   };
   const resetWrinkles = () => {
@@ -873,6 +906,7 @@ export default function App() {
   const resetEyes = () => {
     eyesRef.current = EYE_DEFAULTS;
     setEyesParams(EYE_DEFAULTS);
+    updateOpacity("eyes", 1, false);
     render();
   };
 
@@ -915,12 +949,14 @@ export default function App() {
   const resetDodgeBurn = () => {
     dodgeBurnRef.current = DODGE_BURN_DEFAULTS;
     setDodgeBurn(DODGE_BURN_DEFAULTS);
+    updateOpacity("dodge_burn", 1, false);
     render();
   };
 
   const resetMouth = () => {
     mouthRef.current = MOUTH_DEFAULTS;
     setMouthParams(MOUTH_DEFAULTS);
+    updateOpacity("mouth", 1, false);
     render();
   };
 
@@ -1046,6 +1082,7 @@ export default function App() {
     creases: creasesRef.current,
     tone: toneRef.current,
     crop: cropRef.current,
+    opacity: opacityRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
@@ -1067,6 +1104,8 @@ export default function App() {
     setToneParams(st.tone);
     cropRef.current = st.crop;
     setCrop(st.crop);
+    opacityRef.current = st.opacity;
+    setOpacity(st.opacity);
   };
 
   const markEdited = (path: string, st: PhotoSettings) =>
@@ -2216,237 +2255,265 @@ export default function App() {
           title="Skin"
           actions={
             <ResetButton
-              disabled={!image || sameValues(skinParams, SKIN_DEFAULTS)}
+              disabled={!image || (sameValues(skinParams, SKIN_DEFAULTS) && opacity.skin === 1)}
               onClick={resetSkin}
               what="Skin (Face, Neck and Body)"
             />
           }
           {...panel("skin")}
         >
-          <div className="tabs">
-            {SKIN_TABS.map((t) => (
-              <button
-                key={t.key}
-                className={skinTab === t.key ? "active" : ""}
-                onClick={() => setSkinTab(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-          {SKIN_SLIDERS.map((s) => (
-            <Slider
-              key={`${skinTab}-${s.key}`}
-              label={s.label}
-              hint={s.hint}
-              min={s.min}
-              max={1}
-              step={0.01}
-              centred={s.centred}
-              value={skinParams[skinTab][s.key]}
-              defaultValue={SKIN_REGION_DEFAULTS[s.key]}
-              format={
-                s.key === "shine"
-                  ? (v) => (v < -0.005 ? `Matte ${(-v).toFixed(2)}` : v > 0.005 ? `Gloss ${v.toFixed(2)}` : "Natural")
-                  : undefined
-              }
-              disabled={!image}
-              onChange={(v) => updateSkin(skinTab, s.key, v)}
-            />
-          ))}
-          {skinTab === "neck" && (
-            <Slider
-              label="Neck lines"
-              hint="Soften the horizontal creases across the neck; some of a deep fold is always kept"
-              min={0}
-              max={1}
-              step={0.01}
-              value={skinParams.neck.neck_lines}
-              defaultValue={0}
-              disabled={!image}
-              onChange={(v) => updateSkin("neck", "neck_lines", v)}
-            />
-          )}
-          {skinTab === "face" && (
-            <>
-              <div className="panel__head">
-                <h3 className="panel__subhead">Wrinkles</h3>
-                <ResetButton
-                  disabled={!image || WRINKLE_SLIDERS.every((s) => skinParams.face[s.key] === 0)}
-                  onClick={resetWrinkles}
-                  what="Wrinkles"
-                />
-              </div>
-              {WRINKLE_SLIDERS.map((s) => (
-                <Slider
-                  key={s.key}
-                  label={s.label}
-                  hint={s.hint}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={skinParams.face[s.key]}
-                  defaultValue={0}
-                  disabled={!image}
-                  onChange={(v) => updateSkin("face", s.key, v)}
-                />
+          <OpacityGroup
+            value={opacity.skin}
+            onChange={(v) => updateOpacity("skin", v)}
+            disabled={!image}
+            what="Skin (Face, Neck and Body)"
+          >
+            <div className="tabs">
+              {SKIN_TABS.map((t) => (
+                <button
+                  key={t.key}
+                  className={skinTab === t.key ? "active" : ""}
+                  onClick={() => setSkinTab(t.key)}
+                >
+                  {t.label}
+                </button>
               ))}
-            </>
-          )}
-          <div className="panel__buttons">
-            <button
-              disabled={
-                !image || (view === "mask" || view === "area") || Object.values(skinParams[skinTab]).every((v) => v === 0)
-              }
-              onPointerEnter={() => prefetchWithout(`skin_${skinTab}`)}
-              {...holdHandlers(() => holdWithout(`skin_${skinTab}`), releaseCompare)}
-              title={`Hold to see the photo without the ${skinTab} skin retouching`}
-            >
-              <Eye size={15} /> Hold for before
-            </button>
-            <button
-              disabled={!image || view === "mask"}
-              className={view === "area" && area === skinTab ? "active" : ""}
-              onClick={() => showArea(skinTab)}
-              title={`Show and correct where the ${skinTab} skin tools work`}
-            >
-              <Layers size={15} /> Refine area
-            </button>
-          </div>
-          <p className="panel__model">
-            Facial hair, eyes, brows and lips are left alone automatically. Eye wrinkles and crow's
-            feet are in the Eyes panel. Neck and Body find the skin by the person's own colour, so
-            clothes close to skin colour may be retouched too.
-          </p>
+            </div>
+            {SKIN_SLIDERS.map((s) => (
+              <Slider
+                key={`${skinTab}-${s.key}`}
+                label={s.label}
+                hint={s.hint}
+                min={s.min}
+                max={1}
+                step={0.01}
+                centred={s.centred}
+                value={skinParams[skinTab][s.key]}
+                defaultValue={SKIN_REGION_DEFAULTS[s.key]}
+                format={
+                  s.key === "shine"
+                    ? (v) => (v < -0.005 ? `Matte ${(-v).toFixed(2)}` : v > 0.005 ? `Gloss ${v.toFixed(2)}` : "Natural")
+                    : undefined
+                }
+                disabled={!image}
+                onChange={(v) => updateSkin(skinTab, s.key, v)}
+              />
+            ))}
+            {skinTab === "neck" && (
+              <Slider
+                label="Neck lines"
+                hint="Soften the horizontal creases across the neck; some of a deep fold is always kept"
+                min={0}
+                max={1}
+                step={0.01}
+                value={skinParams.neck.neck_lines}
+                defaultValue={0}
+                disabled={!image}
+                onChange={(v) => updateSkin("neck", "neck_lines", v)}
+              />
+            )}
+            {skinTab === "face" && (
+              <>
+                <div className="panel__head">
+                  <h3 className="panel__subhead">Wrinkles</h3>
+                  <ResetButton
+                    disabled={!image || WRINKLE_SLIDERS.every((s) => skinParams.face[s.key] === 0)}
+                    onClick={resetWrinkles}
+                    what="Wrinkles"
+                  />
+                </div>
+                {WRINKLE_SLIDERS.map((s) => (
+                  <Slider
+                    key={s.key}
+                    label={s.label}
+                    hint={s.hint}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={skinParams.face[s.key]}
+                    defaultValue={0}
+                    disabled={!image}
+                    onChange={(v) => updateSkin("face", s.key, v)}
+                  />
+                ))}
+              </>
+            )}
+            <div className="panel__buttons">
+              <button
+                disabled={
+                  !image || (view === "mask" || view === "area") || Object.values(skinParams[skinTab]).every((v) => v === 0)
+                }
+                onPointerEnter={() => prefetchWithout(`skin_${skinTab}`)}
+                {...holdHandlers(() => holdWithout(`skin_${skinTab}`), releaseCompare)}
+                title={`Hold to see the photo without the ${skinTab} skin retouching`}
+              >
+                <Eye size={15} /> Hold for before
+              </button>
+              <button
+                disabled={!image || view === "mask"}
+                className={view === "area" && area === skinTab ? "active" : ""}
+                onClick={() => showArea(skinTab)}
+                title={`Show and correct where the ${skinTab} skin tools work`}
+              >
+                <Layers size={15} /> Refine area
+              </button>
+            </div>
+            <p className="panel__model">
+              Facial hair, eyes, brows and lips are left alone automatically. Eye wrinkles and crow's
+              feet are in the Eyes panel. Neck and Body find the skin by the person's own colour, so
+              clothes close to skin colour may be retouched too.
+            </p>
+          </OpacityGroup>
         </Panel>
 
         <Panel
           title="Dodge & Burn"
           actions={
             <ResetButton
-              disabled={!image || sameValues(dodgeBurn, DODGE_BURN_DEFAULTS)}
+              disabled={!image || (sameValues(dodgeBurn, DODGE_BURN_DEFAULTS) && opacity.dodge_burn === 1)}
               onClick={resetDodgeBurn}
               what="Dodge & Burn"
             />
           }
           {...panel("dodge_burn")}
         >
-          {DODGE_BURN_SLIDERS.map((s) => (
-            <Slider
-              key={s.key}
-              label={s.label}
-              hint={s.hint}
-              min={0}
-              max={1}
-              step={0.01}
-              value={dodgeBurn[s.key]}
-              defaultValue={0}
-              disabled={!image}
-              onChange={(v) => updateDodgeBurn(s.key, v)}
-            />
-          ))}
-          <div className="panel__buttons">
-            <button
-              disabled={!image || (view === "mask" || view === "area") || sameValues(dodgeBurn, DODGE_BURN_DEFAULTS)}
-              onPointerEnter={() => prefetchWithout("dodge_burn")}
-              {...holdHandlers(() => holdWithout("dodge_burn"), releaseCompare)}
-              title="Hold to see the photo without dodge & burn"
-            >
-              <Eye size={15} /> Hold for before
-            </button>
-          </div>
-          <p className="panel__model">
-            Follows the light already on the face, so nothing is painted against it. Skin texture and colour are kept.
-          </p>
+          <OpacityGroup
+            value={opacity.dodge_burn}
+            onChange={(v) => updateOpacity("dodge_burn", v)}
+            disabled={!image}
+            what="Dodge & Burn"
+          >
+            {DODGE_BURN_SLIDERS.map((s) => (
+              <Slider
+                key={s.key}
+                label={s.label}
+                hint={s.hint}
+                min={0}
+                max={1}
+                step={0.01}
+                value={dodgeBurn[s.key]}
+                defaultValue={0}
+                disabled={!image}
+                onChange={(v) => updateDodgeBurn(s.key, v)}
+              />
+            ))}
+            <div className="panel__buttons">
+              <button
+                disabled={!image || (view === "mask" || view === "area") || sameValues(dodgeBurn, DODGE_BURN_DEFAULTS)}
+                onPointerEnter={() => prefetchWithout("dodge_burn")}
+                {...holdHandlers(() => holdWithout("dodge_burn"), releaseCompare)}
+                title="Hold to see the photo without dodge & burn"
+              >
+                <Eye size={15} /> Hold for before
+              </button>
+            </div>
+            <p className="panel__model">
+              Follows the light already on the face, so nothing is painted against it. Skin texture and colour are kept.
+            </p>
+          </OpacityGroup>
         </Panel>
 
         <Panel
           title="Eyes"
           actions={
             <ResetButton
-              disabled={!image || sameValues(eyesParams, EYE_DEFAULTS)}
+              disabled={!image || (sameValues(eyesParams, EYE_DEFAULTS) && opacity.eyes === 1)}
               onClick={resetEyes}
               what="Eyes"
             />
           }
           {...panel("eyes")}
         >
-          {EYE_SLIDERS.map((s) => (
-            <Slider
-              key={s.key}
-              label={s.label}
-              hint={s.hint}
-              min={s.centred ? -1 : 0}
-              max={1}
-              step={0.01}
-              centred={s.centred}
-              scale={s.key === "iris_hue" && irisScale ? `linear-gradient(to right, ${irisScale.join(", ")})` : s.scale}
-              format={s.centred ? signed : undefined}
-              value={eyesParams[s.key]}
-              defaultValue={EYE_DEFAULTS[s.key]}
-              disabled={!image}
-              onChange={(v) => updateEyes(s.key, v)}
-            />
-          ))}
-          <div className="panel__buttons">
-            <button
-              disabled={
-                !image || (view === "mask" || view === "area") || Object.values(eyesParams).every((v) => v === 0)
-              }
-              onPointerEnter={() => prefetchWithout("eyes")}
-              {...holdHandlers(() => holdWithout("eyes"), releaseCompare)}
-              title="Hold to see the photo without the eye edits"
-            >
-              <Eye size={15} /> Hold for before
-            </button>
-          </div>
-          <p className="panel__model">
-            {faces === 0
-              ? "No faces found in this photo."
-              : faces
-                ? `${faces} face${faces === 1 ? "" : "s"} · MediaPipe Face Landmarker · Apache-2.0`
-                : "Faces are found when you first move a slider. MediaPipe · Apache-2.0"}
-          </p>
+          <OpacityGroup
+            value={opacity.eyes}
+            onChange={(v) => updateOpacity("eyes", v)}
+            disabled={!image}
+            what="Eyes"
+          >
+            {EYE_SLIDERS.map((s) => (
+              <Slider
+                key={s.key}
+                label={s.label}
+                hint={s.hint}
+                min={s.centred ? -1 : 0}
+                max={1}
+                step={0.01}
+                centred={s.centred}
+                scale={s.key === "iris_hue" && irisScale ? `linear-gradient(to right, ${irisScale.join(", ")})` : s.scale}
+                format={s.centred ? signed : undefined}
+                value={eyesParams[s.key]}
+                defaultValue={EYE_DEFAULTS[s.key]}
+                disabled={!image}
+                onChange={(v) => updateEyes(s.key, v)}
+              />
+            ))}
+            <div className="panel__buttons">
+              <button
+                disabled={
+                  !image || (view === "mask" || view === "area") || Object.values(eyesParams).every((v) => v === 0)
+                }
+                onPointerEnter={() => prefetchWithout("eyes")}
+                {...holdHandlers(() => holdWithout("eyes"), releaseCompare)}
+                title="Hold to see the photo without the eye edits"
+              >
+                <Eye size={15} /> Hold for before
+              </button>
+            </div>
+            <p className="panel__model">
+              {faces === 0
+                ? "No faces found in this photo."
+                : faces
+                  ? `${faces} face${faces === 1 ? "" : "s"} · MediaPipe Face Landmarker · Apache-2.0`
+                  : "Faces are found when you first move a slider. MediaPipe · Apache-2.0"}
+            </p>
+          </OpacityGroup>
         </Panel>
 
         <Panel
           title="Mouth"
           actions={
             <ResetButton
-              disabled={!image || sameValues(mouthParams, MOUTH_DEFAULTS)}
+              disabled={!image || (sameValues(mouthParams, MOUTH_DEFAULTS) && opacity.mouth === 1)}
               onClick={resetMouth}
               what="Mouth"
             />
           }
           {...panel("mouth")}
         >
-          {MOUTH_SLIDERS.map((s) => (
-            <Slider
-              key={s.key}
-              label={s.label}
-              hint={s.hint}
-              min={s.centred ? -1 : 0}
-              max={1}
-              step={0.01}
-              centred={s.centred}
-              scale={s.scale}
-              value={mouthParams[s.key]}
-              defaultValue={MOUTH_DEFAULTS[s.key]}
-              format={s.centred ? (v) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2)) : undefined}
-              disabled={!image}
-              onChange={(v) => updateMouth(s.key, v)}
-            />
-          ))}
-          <div className="panel__buttons">
-            <button
-              disabled={!image || (view === "mask" || view === "area") || sameValues(mouthParams, MOUTH_DEFAULTS)}
-              onPointerEnter={() => prefetchWithout("mouth")}
-              {...holdHandlers(() => holdWithout("mouth"), releaseCompare)}
-              title="Hold to see the photo without the mouth edits"
-            >
-              <Eye size={15} /> Hold for before
-            </button>
-          </div>
+          <OpacityGroup
+            value={opacity.mouth}
+            onChange={(v) => updateOpacity("mouth", v)}
+            disabled={!image}
+            what="Mouth"
+          >
+            {MOUTH_SLIDERS.map((s) => (
+              <Slider
+                key={s.key}
+                label={s.label}
+                hint={s.hint}
+                min={s.centred ? -1 : 0}
+                max={1}
+                step={0.01}
+                centred={s.centred}
+                scale={s.scale}
+                value={mouthParams[s.key]}
+                defaultValue={MOUTH_DEFAULTS[s.key]}
+                format={s.centred ? (v) => (v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2)) : undefined}
+                disabled={!image}
+                onChange={(v) => updateMouth(s.key, v)}
+              />
+            ))}
+            <div className="panel__buttons">
+              <button
+                disabled={!image || (view === "mask" || view === "area") || sameValues(mouthParams, MOUTH_DEFAULTS)}
+                onPointerEnter={() => prefetchWithout("mouth")}
+                {...holdHandlers(() => holdWithout("mouth"), releaseCompare)}
+                title="Hold to see the photo without the mouth edits"
+              >
+                <Eye size={15} /> Hold for before
+              </button>
+            </div>
+          </OpacityGroup>
         </Panel>
 
         <Panel title="Clothes" {...panel("clothes")}>
@@ -2496,7 +2563,7 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams, crop },
+                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams, crop, opacity },
                     ALL_DEFAULTS,
                   ),
                 }

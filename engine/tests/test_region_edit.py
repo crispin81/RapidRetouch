@@ -23,3 +23,12 @@ def test_edits_land_in_the_same_place_on_a_crop_at_any_size():
     crop = region_edit.apply(np.zeros((250, 500), np.float32), edits, (1000, 2000), box=(500, 250, 1500, 750))
     ys, xs = np.nonzero(crop > 0.5)
     assert abs(ys.mean() - 125) < 2 and abs(xs.mean() - 250) < 2  # the crop's centre
+
+
+def test_every_area_the_refine_brush_shows_can_be_worked_out():
+    # The Face tab's area once went missing in a refactor: the brush wouldn't load.
+    from rapidretouch_engine.tools import skin
+
+    rgb = np.full((64, 64, 3), 0.5, np.float32)
+    area = skin.face_area(rgb, [], [{"mode": "add", "points": [(0.5, 0.5)], "radius": 0.1}])
+    assert area.shape == (64, 64)
