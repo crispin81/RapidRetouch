@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import {
   FolderOpen,
   Download,
@@ -104,6 +105,21 @@ const TUTORIAL_DISMISSED_KEY = "rapidretouch.tutorialDismissed";
 const EXPORT_FORMAT_KEY = "rapidretouch.exportFormat";
 // About opens by itself on the first launch and after each update (the
 // version it was last shown for), then only from its button.
+/** Bring the window to the front (after the first-launch setup, when About
+ * opens by itself), or where the system won't allow that (Windows sometimes),
+ * flash it in the taskbar / bounce it in the Dock. */
+function bringToFront(): void {
+  const win = getCurrentWindow();
+  win
+    .unminimize()
+    .then(() => win.show())
+    .then(() => win.setFocus())
+    .catch(() => undefined);
+  win.isFocused().then((focused) => {
+    if (!focused) win.requestUserAttention(UserAttentionType.Informational).catch(() => undefined);
+  }).catch(() => undefined);
+}
+
 const ABOUT_SEEN_KEY = "rapidretouch.aboutSeenVersion";
 const EXPORT_SIZE_KEY = "rapidretouch.exportSize";
 
@@ -792,7 +808,10 @@ export default function App() {
         setPrep((p) => (p ? { ...p, fraction: p.fraction + (PREP_DONE_AT - p.fraction) * PREP_STEP } : p));
       } else if (e.event === "setup") {
         if (e.error) setSetup({ message: "", fraction: null, error: e.error });
-        else if (e.fraction === 1) setSetup(null);
+        else if (e.fraction === 1) {
+          setSetup(null);
+          bringToFront(); // the long first download may have left it behind other windows
+        }
         else setSetup({ message: e.message ?? "", fraction: e.fraction ?? null, error: null });
       } else if (e.event === "written") {
         const settle = pendingWrites.current.get(e.path);
@@ -1380,6 +1399,7 @@ export default function App() {
         // engine couldn't start, say).
         showAbout().then((shown) => {
           if (!shown) return;
+          bringToFront();
           try {
             localStorage.setItem(ABOUT_SEEN_KEY, version);
           } catch {
