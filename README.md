@@ -9,10 +9,14 @@ RapidTimelapse.
 
 > **Actively developed: expect frequent updates.**
 
-▶ **New to RapidRetouch? [Watch the tutorial video](https://youtu.be/dvJXRj3YTuc).**
+**New to RapidRetouch? Watch the tutorial:**
+
+[![RapidRetouch tutorial video](https://img.youtube.com/vi/dvJXRj3YTuc/maxresdefault.jpg)](https://youtu.be/dvJXRj3YTuc)
 
 <details>
 <summary><strong>Recent Changes</strong></summary>
+
+**[⬇ Download the latest version](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
 - **2026-10-05 (v1.0.1):** New Relight panel and Dehaze, face tools keep off hats, better side profiles, and faster sliders on laptops
 - **2026-10-04 (v1.0.0):** First release: installers for Windows, Mac and Linux with a one-time engine setup, AI models on an NVIDIA GPU, a Mac's GPU or the CPU, plus Pores and Blemishes sliders and panel Opacity
