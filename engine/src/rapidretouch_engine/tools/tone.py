@@ -194,3 +194,32 @@ def _apply(rgb: np.ndarray, params: dict) -> np.ndarray:
         lab[..., 0] = _apply_lut(lab[..., 0] / 100.0, lut) * 100.0
         out = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
     return out
+
+
+HISTOGRAM_BINS = 64
+
+
+def histogram(rgb: np.ndarray, bins: int = HISTOGRAM_BINS) -> list[float]:
+    """Lightness (Lab L) histogram of ``rgb`` for the curve editor: ``bins``
+    heights 0..1, square-rooted so a few huge bins (a white backdrop) don't
+    flatten the rest. Measured on every 4th pixel: it's only a guide."""
+    small = np.ascontiguousarray(np.clip(rgb[::4, ::4], 0, 1), dtype=np.float32)
+    L = cv2.cvtColor(small, cv2.COLOR_RGB2Lab)[..., 0] / 100.0
+    counts, _ = np.histogram(L, bins=bins, range=(0.0, 1.0))
+    h = np.sqrt(counts.astype(np.float64))
+    top = float(h.max()) or 1.0
+    return [round(float(v) / top, 3) for v in h]
+
+
+def apply_curve(rgb: np.ndarray, points: list[list[float]] | None) -> np.ndarray:
+    """Only the luminosity curve of ``apply`` (its last step)."""
+    lut = curve_lut(points)
+    if lut is None:
+        return rgb
+
+    def part(rows: np.ndarray) -> np.ndarray:
+        lab = cv2.cvtColor(np.clip(rows, 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)
+        lab[..., 0] = _apply_lut(lab[..., 0] / 100.0, lut) * 100.0
+        return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+    return by_rows(part, rgb)

@@ -48,7 +48,7 @@ WRITE_SETTINGS_FILE = False
 ZOOM_SPARE = 0.25
 FACE_WINDOW_MARGIN = 0.5  # face widths around the face outline: every face tool works within it
 FACE_WINDOW_CACHE_SIZE = 10
-STAGE_CACHE_SIZE = 12  # preview stages kept: the current look's, plus a before view's
+STAGE_CACHE_SIZE = 16  # preview stages kept: the current look's, a before view's, and an Opacity's ends
 # Those caches are also held to a share of the computer's memory, so a 16 GB
 # laptop with a 100 MP photo doesn't swap (at least two entries are always
 # kept, for going back and forth), and fewer zoomed areas are kept there.
@@ -104,6 +104,8 @@ def _jpeg_b64(rgb: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+LOCAL_UPDATE_SHARE = 0.25  # removals changing less of the photo than this update the backdrop piece by piece
+LIGHTING_REMOVAL_SHARE = 0.02  # a removal bigger than this share of the photo re-measures the backdrop's lighting
 RELIGHT_MARGIN = 1.35  # a new relight ellipse is this much bigger than the face: the fade starts inside
 
 
@@ -120,6 +122,8 @@ class Engine:
         self.newer_waiting = lambda: False
         self._yielding = False
         self._veil = None  # the photo's haze, for Dehaze (see _tone)
+        self._histogram: list[float] | None = None  # the last preview's, for the curve editor
+        self._preview_light: dict = {}  # the preview backdrop's lighting (see _render_backdrop)
         interrupt.check = self._checkpoint
         self.registry = Registry()
         self.registry.status = self.status
@@ -255,6 +259,7 @@ class Engine:
         self._acne = None
         self._iris_scale = None
         self._veil = None
+        self._preview_light = {}
         self._zoom_tiles, self._face_window_cache = [], {}
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
@@ -346,6 +351,7 @@ class Engine:
         self.alpha_preview = mask_edit.apply(self.alpha_preview_raw, self.mask_edits)
         self.mask_model = manifest.id
         self.backdrop_cache = {}
+        self._preview_light = {}
 
     def mask(self, model: str | None = None) -> dict:
         """The subject mask as a red overlay on the photo (red = backdrop)."""
@@ -484,6 +490,7 @@ class Engine:
         return {
             "preview": self._preview(look),
             "faces": len(self.faces) if self.faces is not None else None,
+            "histogram": self._histogram,
         }
 
     def _tone(self, look: dict) -> dict | None:
@@ -573,6 +580,47 @@ class Engine:
             self.filled_previews.pop()
             self.edit_version += 1
         return {"preview": self._preview(look), "removals": len(self.strokes), "removal_kinds": self._removal_kinds()}
+
+    @staticmethod
+    def _stroke_box(stroke: dict, shape: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Pixels (x0, y0, x1, y1) of an image of ``shape`` a removal can
+        change: the stroke or patch outline, with room for the brush, LaMa's
+        margin and the patch's soft edge."""
+        h, w = shape
+        pts = np.array(stroke["points"], np.float64) * [w, h]
+        lo, hi = pts.min(0), pts.max(0)
+        if stroke.get("kind") == "patch":
+            pad = 0.3 * float(max(hi - lo)) + 4
+        else:
+            pad = 2.5 * float(stroke.get("radius", 0)) * max(h, w) + 4
+        x0, y0 = np.floor(lo - pad).astype(int)
+        x1, y1 = np.ceil(hi + pad).astype(int)
+        return max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+
+    def _changed_boxes(self, before: list[dict], after: list[dict], shape) -> list | None:
+        """Where the photo with removals ``after`` differs from it with
+        ``before``: the boxes of the removals past their common start, or None
+        when that's too much of the photo to be worth updating piece by piece."""
+        common = 0
+        while common < min(len(before), len(after)) and before[common] == after[common]:
+            common += 1
+        boxes = [self._stroke_box(st, shape) for st in before[common:] + after[common:]]
+        area = sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in boxes)
+        return None if area > LOCAL_UPDATE_SHARE * shape[0] * shape[1] else boxes
+
+    def _big_removals(self, look: dict) -> str:
+        """The removals big enough to change the backdrop's measured lighting
+        (a light stand taken out): a key for it. Spots and patches aren't, so
+        the lighting isn't measured again after each one."""
+        if not look.get("removals", True):
+            return "[]"
+        h, w = self.preview.shape[:2]
+        big = []
+        for st in self.strokes:
+            x0, y0, x1, y1 = self._stroke_box(st, (h, w))
+            if (x1 - x0) * (y1 - y0) > LIGHTING_REMOVAL_SHARE * h * w:
+                big.append(st)
+        return json.dumps(big)
 
     def _removal_kinds(self) -> dict[str, int]:
         """How many removals of each kind ("fill", "reflection", "patch")."""
@@ -922,10 +970,41 @@ class Engine:
             if len(self._pretone) >= 2:
                 self._pretone.pop(next(iter(self._pretone)))
         self._pretone[key] = img
-        return tone.apply(relight.apply(img, look["relight"]), self._tone(look))
+        img = relight.apply(img, look["relight"])
+        # The curve editor's histogram: the photo as the curve sees it (after
+        # the rest of the tone), so it lines up with the curve's input axis.
+        t = self._tone(look)
+        if t and t.get("curve"):
+            img = tone.apply(img, {**t, "curve": None})
+            self._histogram = tone.histogram(img)
+            return tone.apply_curve(img, t["curve"])
+        img = tone.apply(img, t)
+        self._histogram = tone.histogram(img)
+        return img
 
     def _render_retouch(self, look: dict) -> np.ndarray:
-        """The preview up to (not including) the tone."""
+        """The preview up to (not including) the tone.
+
+        A panel's Opacity, part way: the panels after it would have to run
+        again for every step of the slider (~0.2 s, about a second on a laptop
+        without a graphics card). The preview instead blends the finished
+        picture with that panel fully on and with it off, both kept, so the
+        slider only blends. Measured against the exact result (which zooming
+        in and exports still use): at most 3 levels in 255, under half a level
+        almost everywhere, on DSC_2376-2, P1024004 and P1167822."""
+        ops = look["opacity"] or {}
+        partial = [g for g, v in ops.items() if 0 < float(v) < 1]
+        if not partial:
+            return self._render_retouch_exact(look)
+        on = {**ops, **{g: 1.0 for g in partial}}
+        full = self._render_retouch_exact({**look, "opacity": on})
+        out = full.copy()
+        for g in partial:
+            off = self._render_retouch_exact({**look, "opacity": {**on, g: 0.0}})
+            out -= np.float32(1 - float(ops[g])) * (full - off)
+        return np.clip(out, 0, 1)
+
+    def _render_retouch_exact(self, look: dict) -> np.ndarray:
         found_key = (self.edit_version if look["removals"] else -1, self.mask_version)
 
         def base():
@@ -935,8 +1014,10 @@ class Engine:
             return self._render_backdrop(look["backdrop"], look["model"], look["removals"])
 
         def people():
+            # Found on the photo as shot: a removal doesn't move the neck, and
+            # finding it again after every patch took ~1 s at full resolution.
             self._ensure_mask()
-            return self._body_people(base(), self.alpha_preview, self._preview_cache, found_key)
+            return self._body_people(self.preview, self.alpha_preview, self._preview_cache, (-1, self.mask_version))
 
         stages = self._face_stages(look, people)
         # Creases last: they only touch the clothes and the other tools only
@@ -964,18 +1045,32 @@ class Engine:
             return base
         self._ensure_mask(model)
         p = backdrop_smooth.Params.from_dict(backdrop)
-        # Removals change the pixels the backdrop is measured from, so they're
-        # part of the key; the slider-only params still just recompose.
-        version = self.edit_version if removals else self.mask_version
-        key = (backdrop_smooth.prepare_key(p), version, removals)
-        prep = self.backdrop_cache.pop(key, None)  # re-inserted below: LRU order
-        if prep is None:
-            self.status("Smoothing backdrop")
-            prep = backdrop_smooth.prepare(base, self.alpha_preview, p)
+        # Removals change the pixels, so they're part of the key; the
+        # slider-only params still just recompose.
+        strokes = self.strokes if removals else []
+        key = (backdrop_smooth.prepare_key(p), self.mask_version, removals, json.dumps(strokes))
+        hit = self.backdrop_cache.pop(key, None)  # re-inserted below: LRU order
+        if hit is None:
+            light_key = (key[:3], self._big_removals({"removals": removals}))
+            light = self._preview_light.get(light_key)
+            if light is None:
+                light = backdrop_smooth.lighting(base, self.alpha_preview, p)
+                self._preview_light = {k: v for k, v in self._preview_light.items() if k[0] == key[:3]}
+                self._preview_light[light_key] = light
+            # The same settings and lighting, before or after a few small
+            # removals (or an undo): only where they changed is prepared again.
+            prev = next((v for k, v in reversed(self.backdrop_cache.items()) if k[:3] == key[:3] and v[1] == light_key), None)
+            boxes = None if prev is None else self._changed_boxes(prev[0], strokes, base.shape[:2])
+            if boxes is not None:
+                prep = backdrop_smooth.update(prev[2], base, boxes)
+            else:
+                self.status("Smoothing backdrop")
+                prep = backdrop_smooth.prepare(base, self.alpha_preview, p, light)
+            hit = (list(strokes), light_key, prep)
             if len(self.backdrop_cache) >= 2:
                 self.backdrop_cache.pop(next(iter(self.backdrop_cache)))
-        self.backdrop_cache[key] = prep
-        return backdrop_smooth.compose(prep, p)
+        self.backdrop_cache[key] = hit
+        return backdrop_smooth.compose(hit[2], p)
 
     def render_region(self, region: list[float], scale: float, **look) -> dict:
         """A crop of the full-resolution result, for zoomed-in viewing.
@@ -1176,7 +1271,7 @@ class Engine:
             self._ensure_mask(look["model"])
             p = backdrop_smooth.Params.from_dict(backdrop)
             alpha = self._alpha_full()
-            light = self._lighting(p, edited, alpha, removal_key, mask_key)
+            light = self._lighting(p, edited, alpha, self._big_removals(look), mask_key)
             return backdrop_smooth.smooth_area(edited, alpha, p, light, area)
 
         out = np.array(smoothed(box), np.float32)
@@ -1213,7 +1308,7 @@ class Engine:
             p = backdrop_smooth.Params.from_dict(backdrop)
             alpha = self._cached("alpha", mask_key, edited_alpha)
 
-            light = self._lighting(p, edited, alpha, removal_key, mask_key)
+            light = self._lighting(p, edited, alpha, self._big_removals(look), mask_key)
 
             def smooth():
                 self.status("Smoothing backdrop at full resolution")
@@ -1223,7 +1318,31 @@ class Engine:
             # are: several GB at 100 MP), so a Skin change while zoomed in with
             # Neck/Body on (the whole-photo path) doesn't smooth it all again.
             if rgb.nbytes <= BACKDROP_KEEP_SHARE * MEMORY:
-                rgb = self._cached("backdrop_result", json.dumps([asdict(p), removal_key, mask_key]), smooth)
+                # After a few small removals (or an undo), only where they
+                # changed is smoothed again (see _changed_boxes).
+                strokes = self.strokes if look["removals"] else []
+                result_key = json.dumps([asdict(p), mask_key, self._big_removals(look)])
+                hit = self._full.get("backdrop_result")
+                boxes = None
+                if hit and hit[0][0] == result_key:
+                    boxes = self._changed_boxes(hit[0][1], strokes, rgb.shape[:2])
+                if boxes == []:
+                    out = hit[1]
+                elif boxes:
+                    # Inside the person smoothing changes nothing: the patched
+                    # pixels go straight in. Elsewhere just that area is smoothed.
+                    out = hit[1].copy()
+                    for box in boxes:
+                        x0, y0, x1, y1 = box
+                        if backdrop_smooth.in_subject(alpha, box):
+                            out[y0:y1, x0:x1] = rgb[y0:y1, x0:x1]
+                        else:
+                            self.status("Smoothing backdrop at full resolution")
+                            out[y0:y1, x0:x1] = backdrop_smooth.smooth_area(rgb, alpha, p, light, box)
+                else:
+                    out = smooth()
+                self._full["backdrop_result"] = ((result_key, list(strokes)), out)
+                rgb = out
             else:
                 rgb = smooth()
             steps.append(
@@ -1239,7 +1358,7 @@ class Engine:
             self._ensure_mask(model)
             key = json.dumps([self.mask_model, self.mask_edits])  # the mask may only now be loaded
             alpha = self._cached("alpha", key, edited_alpha)
-            return self._body_people(edited, alpha, self._full_found, (removal_key, key))
+            return self._body_people(self.image.rgb, alpha, self._full_found, (None, key))  # as shot (see _render_retouch)
 
         if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")):
             self.status("Retouching the face at full resolution")

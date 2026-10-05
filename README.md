@@ -18,6 +18,7 @@ RapidTimelapse.
 
 **[⬇ Download the latest version](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
+- **2026-10-05 (v1.0.2):** Remove tools move to the top bar, an eye on each slider to switch it off, instant Opacity sliders, faster patching, a histogram behind the tone curve, and Acne finds spots it missed
 - **2026-10-05 (v1.0.1):** New Relight panel and Dehaze, face tools keep off hats, better side profiles, and faster sliders on laptops
 - **2026-10-04 (v1.0.0):** First release: installers for Windows, Mac and Linux with a one-time engine setup, AI models on an NVIDIA GPU, a Mac's GPU or the CPU, plus Pores and Blemishes sliders and panel Opacity
 - **2026-10-03:** Faster previews and zooming, rebuilt Acne tool, crop & straighten, batch export, new tone and eye controls
@@ -30,12 +31,12 @@ RapidTimelapse.
 
 Every adjustment is a slider (or a brush where a slider can't know what you mean),
 applied non-destructively and live on a 2048 px preview, with full-resolution detail
-when you zoom in.
+when you zoom in. Each slider from Skin down has an eye to switch it off and on.
 
 | Panel | Tools |
 |---|---|
-| **Remove** | Remove brush (LaMa inpainting), Patch (Photoshop-style lasso + drag), Glasses reflections (alpha) |
-| **Tone** | Temperature, Tint, Exposure (±2.5 EV), Dehaze, Vibrance (skin protected), Luminosity curve (light only, never colour) |
+| **Remove** (top bar) | Remove brush (B, LaMa inpainting), Glasses reflections (G, alpha), Patch (P, Photoshop-style lasso + drag); each with its own size, Undo, Clear and Hold for before |
+| **Tone** | Temperature, Tint, Exposure (±2.5 EV), Dehaze, Vibrance (skin protected), Luminosity curve (light only, never colour) with a histogram behind it |
 | **Backdrop** | Smoothing (creases, seams, dust) with matched grain, Evenness, Brightness (±2.5 EV), edge protection for hair; Backdrop / Outdoor mode, detected automatically |
 | **Skin** (Face / Neck / Body tabs) | Acne, Blemishes, Smooth, Even tone, Texture, Pores, Shine (matte ↔ gloss); Wrinkles: forehead, frown, smile and cheek lines, chin, neck lines. Moles are kept. Refine area brush per tab |
 | **Dodge & burn** | Contour, Highlights, Shadows (keeps off hair and hats) |

@@ -55,6 +55,9 @@ function sample(pts: Point[], n = 96): Point[] {
 
 interface Props {
   points: Point[];
+  /** The photo's lightness histogram as the curve sees it (bin heights 0..1),
+   * drawn behind the curve. */
+  histogram?: number[] | null;
   disabled?: boolean;
   onChange: (points: Point[]) => void;
 }
@@ -63,7 +66,7 @@ interface Props {
  * Luminosity point curve: reshapes brightness only, so contrast doesn't shift
  * colours. Click to add a point, drag to move it, double-click to remove it.
  */
-export default function CurveEditor({ points: pts, disabled, onChange }: Props) {
+export default function CurveEditor({ points: pts, histogram, disabled, onChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragging = useRef<number | null>(null);
   const colour = COLOUR;
@@ -143,6 +146,18 @@ export default function CurveEditor({ points: pts, disabled, onChange }: Props) 
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
       >
+        {histogram && histogram.length > 1 && (
+          <path
+            className="curves__histogram"
+            d={
+              `M0,${SIZE} ` +
+              histogram
+                .map((h, i) => `L${((i + 0.5) / histogram.length) * SIZE},${SIZE - h * SIZE * 0.92}`)
+                .join(" ") +
+              ` L${SIZE},${SIZE} Z`
+            }
+          />
+        )}
         {[0.25, 0.5, 0.75].map((g) => (
           <g key={g} className="curves__grid">
             <line x1={g * SIZE} y1={0} x2={g * SIZE} y2={SIZE} />

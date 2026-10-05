@@ -142,6 +142,9 @@ button.primary {
 
 .toolbar {
   grid-area: toolbar;
+  /* Above the photo, so the tools' hover labels can hang over it. */
+  position: relative;
+  z-index: 40;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -157,8 +160,64 @@ button.primary {
   margin-left: 12px;
 }
 
+/* The editing tools: yellow text and icons, set apart from the view controls. */
+.toolbar__group--tools {
+  margin-left: 0;
+}
+
+.toolbar__group--tools button:not(.active) {
+  color: #ffcc33;
+}
+
+.toolbar__group--tools button {
+  position: relative;
+  padding: 6px 10px;
+}
+
+/* A tool's sliders in the top bar (brush size, reflection strength). */
+.toolbar__range-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.toolbar__range {
+  width: 90px;
+  margin: 0 4px;
+  accent-color: #ffcc33;
+}
+
+/* A tool's close: the same deep red as a switched-off slider's eye. */
+.toolbar__group--tools button.toolbar__close {
+  color: #c2414b;
+}
+
+.toolbar__group--tools button.toolbar__close:hover {
+  color: #d8606a;
+  border-color: #c2414b;
+}
+
+/* Icon-only tools: their name shows straight away on hover, just below. */
+.toolbar__group--tools button[data-tip]:hover::after,
+.toolbar__group--tools .toolbar__range-wrap:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #14151a;
+  border: 1px solid #ffcc33;
+  color: #ffffff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .toolbar__zoom {
-  min-width: 44px;
+  min-width: 34px;
   color: #8d8e99;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -168,9 +227,11 @@ button.primary {
   flex: 1;
 }
 
-.toolbar__info {
+/* The open photo's name and details, after the app's name. */
+.titlebar__detail {
+  margin-left: 6px;
   color: #8d8e99;
-  font-size: 12px;
+  font-weight: 400;
 }
 
 .viewer {
@@ -289,17 +350,59 @@ button.primary {
   justify-content: space-between;
 }
 
+.slider__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* A slider's eye: switches that one adjustment off and on. */
+.slider__eye {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #4fa95b; /* on: a shade down from the export dialog's green */
+  line-height: 0;
+  cursor: pointer;
+}
+
+.slider__eye:hover {
+  color: #6fcf7a;
+}
+
+/* Off stands out: worth noticing before an export. */
+.slider--off .slider__eye,
+.slider--off .slider__value {
+  color: #c2414b; /* deep red: off */
+}
+
+.slider--off .slider__eye:hover {
+  color: #d8606a;
+}
+
+.slider--off input[type="range"] {
+  opacity: 0.35;
+}
+
 .slider__value {
   color: #8d8e99;
   font-variant-numeric: tabular-nums;
 }
 
-/* A slider's colour scale (e.g. Lip hue): a thin bar just above the track. */
-.slider__scale {
-  display: block;
-  height: 4px;
-  margin-bottom: -2px;
-  border-radius: 2px;
+/* A slider along colours (e.g. Temperature, Lip hue): the track is the colour
+   scale, a little taller, and the thumb sits on it with a dark ring so it shows
+   over the pale middle. */
+.slider--scale input[type="range"] {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.slider--scale input[type="range"]::-webkit-slider-thumb {
+  box-shadow: 0 0 0 1.5px rgba(20, 21, 26, 0.75);
+}
+
+.slider--scale input[type="range"]::-moz-range-thumb {
+  box-shadow: 0 0 0 1.5px rgba(20, 21, 26, 0.75);
 }
 
 /* Custom-styled rather than left to the native OS slider widget, which renders
@@ -1204,7 +1307,14 @@ button.primary {
    the toolbar's 8px gap plus the group's 12px margin. */
 .toolbar__about {
   margin-left: 14px;
-  color: #ffcc33;
+  /* Solid yellow with dark text, like an active tab (Skin's Face). */
+  background: #ffcc33;
+  border-color: #ffcc33;
+  color: #14151a;
+}
+
+.toolbar__about:hover {
+  background: #ffd85c;
 }
 
 /* Crop */
@@ -1596,6 +1706,28 @@ button.primary {
   animation: setup-busy 1.2s ease-in-out infinite;
 }
 
+/* While the preview is updating (top right, where the detail badge goes). */
+.viewer__busy {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  padding: 7px;
+  border-radius: 50%;
+  background: rgba(20, 21, 26, 0.85);
+  line-height: 0;
+  pointer-events: none;
+}
+
+.viewer__busy-circle {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid #3a3b45;
+  border-top-color: #ffcc33;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
 /* While a zoomed-in view's full detail is being made (top right, clear of
    the other badges). */
 .viewer__badge--detail {
@@ -1624,4 +1756,11 @@ button.primary {
 
 .cropbar__grip:active {
   cursor: grabbing;
+}
+
+/* The photo's lightness, behind the tone curve. */
+.curves__histogram {
+  fill: rgba(183, 184, 194, 0.16);
+  stroke: rgba(183, 184, 194, 0.3);
+  stroke-width: 1;
 }

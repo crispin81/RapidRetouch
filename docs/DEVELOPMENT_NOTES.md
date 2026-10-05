@@ -412,6 +412,23 @@ GPU matters.
   (`AI_SKIN_SURE`), that stands in for the colour test, down to twice the usual darkness margin.
   Not near stubble the stubble test found (`AI_SKIN_BEARD`): the model calls a beard face skin, and
   shadow-side beard came in on P1167822 without that.
+- After 1.0.1 (2026-10-05):
+  - Stubble test only on bearded faces (`_bearded`): on DSCF7256 it marked her spots, smile shadow
+    and nostril shade as stubble, so they left the skin map and Acne never saw them (since 1.0.0).
+    Small deep holes (nostrils) are kept out of the AI-skin extra by a black top-hat (`AI_SKIN_HOLE`).
+  - Removals no longer redo the backdrop and neck/body measuring: neck/body skin is found on the
+    photo as shot, the backdrop lighting is measured again only after a removal bigger than 2% of
+    the photo (`LIGHTING_REMOVAL_SHARE`), and the smoothed backdrop is updated only in the removals'
+    boxes (`_changed_boxes`; exact, max diff 0): on the preview `backdrop_smooth.update` just moves
+    `base` by w_soft x the change (the only term that depends on the pixels), and at full resolution
+    a box that's all solid subject takes the new pixels as they are (`in_subject`), with no smoothing. DSC_2376-2, 8 cores: patch
+    1.13 → 0.32 s, zoomed view after it 2.74 → 1.13 s, after an undo 0.49 s.
+  - Opacity part way: the preview blends the finished picture with the panel on and off (max 3/255
+    from exact; zoom and export stay exact). A drag step 0.19 → 0.018 s.
+  - The footer kept "Rendering full-resolution detail" after the first zoom: the engine's cache was
+    hitting (0.02-0.04 s a step). It's set back to Ready once the detail arrives.
+  - A loading circle over the photo when an update takes over 0.3 s. Remove tools (Brush, Glasses,
+    Patch) in the top bar; P toggles Patch.
 - Relight panel: a radial gradient placed over the biggest face (`relight_default`), Exposure, Warmth
   and Feather, moved/stretched/turned/feathered by hand (`RelightOverlay`). No masking, by choice:
   plain smoothstep falloff, as Lightroom's radial filter. Applied with the tone (per pixel, after

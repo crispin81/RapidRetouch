@@ -407,6 +407,29 @@ def prepare(rgb: np.ndarray, alpha: np.ndarray, p: Params, light: Lighting | Non
     return Prepared(rgb, base, even, grain, alpha, w_soft, light.lf, light.to_even, box, (H, W))
 
 
+def update(prep: Prepared, rgb: np.ndarray, boxes) -> Prepared:
+    """``prep`` (of the whole photo) for ``rgb``, which differs from the photo
+    it was prepared from only inside ``boxes`` (x0, y0, x1, y1, pixels).
+    Exact and nearly free: of everything ``prepare`` makes, only ``base``
+    depends on the pixels, and only on each pixel's own value
+    (w_soft * (lf - rgb)), so a removal just moves it by w_soft times the
+    change. Inside the person w_soft is 0: nothing to do but the new pixels.
+    (Preparing the whole photo again took ~1 s, several on a laptop.)"""
+    base = prep.base.copy()
+    for x0, y0, x1, y1 in boxes:
+        ws = prep.w_soft[y0:y1, x0:x1]
+        if ws.any():
+            base[y0:y1, x0:x1] -= ws * (rgb[y0:y1, x0:x1] - prep.rgb[y0:y1, x0:x1])
+    return Prepared(rgb, base, prep.even, prep.grain, prep.alpha, prep.w_soft,
+                    prep.light_small, prep.to_even_small, prep.box, prep.full_shape)
+
+
+def in_subject(alpha: np.ndarray, box) -> bool:
+    """Whether ``box`` is all solid subject, where smoothing changes nothing."""
+    x0, y0, x1, y1 = box
+    return bool(alpha[y0:y1, x0:x1].min() >= 1.0) if x1 > x0 and y1 > y0 else True
+
+
 def smooth_area(rgb: np.ndarray, alpha: np.ndarray, p: Params, light: Lighting, box) -> np.ndarray:
     """The smoothed backdrop for ``box`` (x0, y0, x1, y1) of the whole photo
     ``rgb``, exactly as when smoothing all of it."""

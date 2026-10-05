@@ -190,7 +190,12 @@ def face_skin(lab: np.ndarray, lm: np.ndarray, alpha: np.ndarray | None = None, 
     region = face_region(lab.shape[:2], lm, alpha, outline)
     model = SkinModel(lab, lm)
     skin = region * model.probability(lab)
-    hair = stubble(lab, region, lm, model)
+    # Without a beard, what the stubble test finds is spots, smile shadows and
+    # nostril shade (DSCF7256): left out as "stubble", Acne never saw her spots.
+    if _bearded(lab, lm, model):
+        hair = stubble(lab, region, lm, model)
+    else:
+        hair = np.zeros(lab.shape[:2], np.float32)
     return skin.astype(np.float32), hair, model
 
 
@@ -337,6 +342,8 @@ HAIR_SURE = (0.4, 0.7)  # person-parts model's hair probability: unsure .. sure
 # chin), down to this much darker than the sampled skin (nostrils stay out).
 AI_SKIN_SURE = (0.5, 0.8)
 AI_SKIN_DARK = 2.0  # x DARK_MARGIN
+AI_SKIN_HOLE = (0.08, (15.0, 25.0))  # face widths, Lab L: small holes this much darker than
+# around them (nostrils, the mouth's corners) stay out; spots are only a few L darker
 AI_SKIN_BEARD = 0.04  # face widths: how far from found stubble the colour test still decides
 ACNE_RIM = 0.5  # share of a spot's own crisp rim taken out of its texture
 TEXTURE_KEEP = 0.003  # face widths: finer than this is texture, always kept
@@ -907,7 +914,13 @@ def _face_weights(work, scale, lm, box, full_shape, edits, head_hair, ai_skin=No
         # in shadow: near the stubble it finds, the colour test still decides
         # (beard on the shadow side of P1167822's face came in otherwise).
         near_beard = np.clip(blur(hair, max(0.7, AI_SKIN_BEARD * face_width(wlm))) * 3, 0, 1)
-        skin_w = np.maximum(skin_w, region * sure * shaded * (1 - near_beard))
+        # Nostrils: dark enough to pass the lenient darkness test, but small
+        # deep holes, unlike a shadow (closing fills them in; a black top-hat).
+        L = work[..., 0]
+        k = max(3, int(AI_SKIN_HOLE[0] * face_width(wlm)) | 1)
+        closed = -max_filter(-max_filter(L, k), k)
+        hole = _smoothstep(closed - L, *AI_SKIN_HOLE[1])
+        skin_w = np.maximum(skin_w, region * sure * shaded * (1 - near_beard) * (1 - hole))
     W = blur(skin_w * (1 - hair), soft)
     # Even tone works on the whole face (not eyes, brows, lips, facial
     # hair or anything too dark to be skin) without the colour test: a
