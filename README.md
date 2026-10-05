@@ -11,7 +11,7 @@ RapidTimelapse.
 
 **New to RapidRetouch? Watch the tutorial:**
 
-[![RapidRetouch tutorial video](https://img.youtube.com/vi/dvJXRj3YTuc/maxresdefault.jpg)](https://youtu.be/dvJXRj3YTuc)
+[![RapidRetouch tutorial video](docs/tutorial-thumbnail.jpg)](https://youtu.be/dvJXRj3YTuc)
 
 <details>
 <summary><strong>Recent Changes</strong></summary>
