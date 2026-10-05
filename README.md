@@ -34,7 +34,7 @@ when you zoom in.
 | **Tone** | Temperature, Tint, Exposure (±2.5 EV), Dehaze, Vibrance (skin protected), Luminosity curve (light only, never colour) |
 | **Backdrop** | Smoothing (creases, seams, dust) with matched grain, Evenness, Brightness (±2.5 EV), edge protection for hair; Backdrop / Outdoor mode, detected automatically |
 | **Skin** (Face / Neck / Body tabs) | Acne, Blemishes, Smooth, Even tone, Texture, Pores, Shine (matte ↔ gloss); Wrinkles: forehead, frown, smile and cheek lines, chin, neck lines. Moles are kept. Refine area brush per tab |
-| **Dodge & burn** | Contour, Highlights, Shadows (keeps off hair) |
+| **Dodge & burn** | Contour, Highlights, Shadows (keeps off hair and hats) |
 | **Relight** | A radial light placed over the face: Exposure, Warmth and Feather, with the circle moved, stretched, turned and feathered by hand |
 | **Eyes** | Dark circles, Eye bags, Wrinkles, Eye whites, Eye veins, Iris, Iris saturation, Iris hue, Catch light, Eyelashes |
 | **Mouth** | Lip hue, Lip saturation, Lip smoothing, Teeth whitening |
