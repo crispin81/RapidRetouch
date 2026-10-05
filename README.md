@@ -11,6 +11,17 @@ RapidTimelapse.
 
 ▶ **New to RapidRetouch? [Watch the tutorial video](https://youtu.be/dvJXRj3YTuc).**
 
+<details>
+<summary><strong>Recent Changes</strong></summary>
+
+- **2026-10-05 (v1.0.1):** New Relight panel and Dehaze, face tools keep off hats, better side profiles, and faster sliders on laptops
+- **2026-10-04 (v1.0.0):** First release: installers for Windows, Mac and Linux with a one-time engine setup, AI models on an NVIDIA GPU, a Mac's GPU or the CPU, plus Pores and Blemishes sliders and panel Opacity
+- **2026-10-03:** Faster previews and zooming, rebuilt Acne tool, crop & straighten, batch export, new tone and eye controls
+- **2026-09-30:** 16-bit TIFF export, neck & body skin, refine-area brushes and three-slider dodge & burn
+- **2026-09-28:** First version: skin, eyes, mouth, backdrop, dodge & burn, patch tool, presets and film strip
+
+</details>
+
 ## What it does
 
 Every adjustment is a slider (or a brush where a slider can't know what you mean),
