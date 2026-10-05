@@ -61,3 +61,15 @@ def test_white_balance_warms_cools_and_tints_without_changing_brightness():
     Y = lambda rgb: float(srgb_to_linear(rgb) @ np.array([0.2126, 0.7152, 0.0722]))
     assert abs(Y(warm) - Y(grey[0, 0])) < 0.01 and abs(Y(magenta) - Y(grey[0, 0])) < 0.01
 
+
+
+def test_dehaze_takes_off_the_photos_own_veil_and_keeps_white():
+    from rapidretouch_engine.tools import tone
+
+    hazy = np.linspace(0.25, 1.0, 300, dtype=np.float32)[None, :, None].repeat(3, axis=2).repeat(10, axis=0)
+    veil = tone.haze_veil(hazy)
+    out = tone.apply(hazy, {"dehaze": 1.0, "veil": veil})
+    assert out[0, 0, 0] < 0.05  # the lifted black is black again
+    assert abs(out[0, -1, 0] - 1.0) < 1e-3  # white stays white
+    misty = tone.apply(hazy, {"dehaze": -1.0})
+    assert misty[0, 0, 0] > hazy[0, 0, 0]  # below zero adds haze

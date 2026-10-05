@@ -26,6 +26,7 @@ from .colour import linear_to_srgb, srgb_to_linear
 from .eyes import EYES, FACE_OVAL, LINE_HIGH, LINE_LOW, _inner_feather, _poly_mask, _relight, _wrinkle_lift
 from .filters import blur, grow_mask, masked_blur, max_filter
 from . import region_edit
+from .. import interrupt
 from .reflection import guided_filter
 
 LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
@@ -171,6 +172,15 @@ def forehead_outline(lm: np.ndarray, reach: float | None = None) -> np.ndarray:
     up = -_face_down(lm) * (HAIRLINE_REACH if reach is None else reach) * face_width(lm)
     top = set(FOREHEAD_ARC)
     return np.array([lm[i] + up if i in top else lm[i] for i in FACE_OVAL], np.float32)
+
+
+def profile_outline(lm: np.ndarray, reach: float | None = None) -> np.ndarray:
+    """``forehead_outline`` widened to take in every landmark. On a side
+    profile the outline's far side runs down the cheek, inside the face, and
+    left out the nose, upper lip and front of the chin (P1024004); the hull
+    reaches round them. It also takes in background (in front of the lips and
+    chin), so only colour-tested maps may use it. Frontal faces: the same."""
+    return cv2.convexHull(np.vstack([forehead_outline(lm, reach), lm[:, :2]]).astype(np.float32))[:, 0]
 
 
 def face_skin(lab: np.ndarray, lm: np.ndarray, alpha: np.ndarray | None = None, outline: np.ndarray | None = None):
@@ -321,6 +331,13 @@ ACNE_TEXTURE = 0.003  # finer than this is texture, kept on top of the rebuilt t
 ACNE_RING = 0.01  # face widths around a candidate that must be skin...
 ACNE_SURROUNDED = 0.8  # ...this share of it at least
 HAIR_SURE = (0.4, 0.7)  # person-parts model's hair probability: unsure .. sure
+# Shadowed skin (under the cheekbones and chin) fails the colour test: it's lit
+# by bounce or fill light of another colour, and noisier. Where the person-parts
+# model is sure it's face skin, that stands in for the colour test (DSC_2409's
+# chin), down to this much darker than the sampled skin (nostrils stay out).
+AI_SKIN_SURE = (0.5, 0.8)
+AI_SKIN_DARK = 2.0  # x DARK_MARGIN
+AI_SKIN_BEARD = 0.04  # face widths: how far from found stubble the colour test still decides
 ACNE_RIM = 0.5  # share of a spot's own crisp rim taken out of its texture
 TEXTURE_KEEP = 0.003  # face widths: finer than this is texture, always kept
 # Moles are kept (part of someone's identity; the Remove brush takes one out):
@@ -771,16 +788,21 @@ def _apply_region(lab, W, fw, p: RegionParams, model, lm=None, W_even=None, spot
     eye_w = 0.2 * fw  # the eye tools' colour-matching scale, in this face's units
     if lm is not None:  # wrinkles first, while the fine detail is as shot
         _smooth_lines(lab, W, lm, fw, p, eye_w, W_even)
+        interrupt.check()
     if p.acne > 0:
         # Over the colour-tested skin, not the whole face region as Even tone
         # is: over the region it caught mouth-corner shadows and hair.
         _heal_acne(lab, W, fw, p.acne, W_even, spots)
+        interrupt.check()
     if p.blemishes > 0:
         _heal_blemishes(lab, W, fw, p.blemishes)
+        interrupt.check()
     if p.even > 0:
         _even_tone(lab, W if W_even is None else W_even, fw, p.even, model)
+        interrupt.check()
     if p.smooth > 0:
         _smooth(lab, W, fw, p.smooth, eye_w)
+        interrupt.check()
     if p.shine != 0:
         _shine(lab, W, fw, p.shine, eye_w)
 
@@ -805,6 +827,7 @@ def _retouch(out: np.ndarray, box, fw: float, p: RegionParams, weights, work_fw:
     scale = np.array([work.shape[1] / lab.shape[1], work.shape[0] / lab.shape[0]], np.float32)
     wfw = fw * scale[0]
     W, model, wlm, extra, W_even, *more = weights(work, scale)
+    interrupt.check()
     maps = more[0] if more else {}
     _apply_region(work, W, wfw, p, model, wlm, W_even, maps.get("spots"))
     if extra is not None:
@@ -814,12 +837,14 @@ def _retouch(out: np.ndarray, box, fw: float, p: RegionParams, weights, work_fw:
     else:
         delta = cv2.resize(work - before, (lab.shape[1], lab.shape[0]), interpolation=cv2.INTER_CUBIC)
         lab += delta
+    interrupt.check()
     if p.texture > 0:
         # Pores are too small to work out on the smaller copy: this one runs
         # at the image's own resolution.
         W_tex = W if maps.get("texture_gain") is None else W * maps["texture_gain"]
         W_full = W_tex if s == 1 else cv2.resize(W_tex, (lab.shape[1], lab.shape[0]), interpolation=cv2.INTER_LINEAR)
         _texture(lab, W_full, fw, p.texture)
+        interrupt.check()
     if p.pores > 0:
         # Over the whole face region (as Even tone), not the colour-tested skin:
         # the sides of the nose and the smile crease fail the colour test (red,
@@ -843,7 +868,7 @@ def _face_boxes(shape: tuple[int, int], faces: list[np.ndarray]):
         fw = face_width(lm)
         if fw < 40:  # too small to retouch meaningfully
             continue
-        pts = forehead_outline(lm, SKIN_FOREHEAD_REACH)  # the face oval, up to the hairline
+        pts = profile_outline(lm, SKIN_FOREHEAD_REACH)  # the face oval, up to the hairline
         x0, y0 = np.maximum(np.floor(pts.min(0) - 0.15 * fw), 0).astype(int)
         x1, y1 = np.minimum(np.ceil(pts.max(0) + 0.15 * fw), [w, h]).astype(int)
         yield lm, fw, (int(x0), int(y0), int(x1), int(y1))
@@ -863,7 +888,7 @@ def _map_into(m: np.ndarray, frac_box, box, full_shape, out_shape) -> np.ndarray
     return cv2.remap(m.astype(np.float32), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
-def _face_weights(work, scale, lm, box, full_shape, edits, head_hair):
+def _face_weights(work, scale, lm, box, full_shape, edits, head_hair, ai_skin=None):
     """The face tools' skin weights on a work crop: W (colour-tested skin, no
     facial hair), W_even (the face region, for Even tone, placed wrinkle
     areas and Acne's surroundings), the person's SkinModel and the landmarks
@@ -871,8 +896,18 @@ def _face_weights(work, scale, lm, box, full_shape, edits, head_hair):
     h, w = full_shape
     wlm = (lm - box[:2]) * scale
     outline = forehead_outline(wlm, SKIN_FOREHEAD_REACH)
-    skin_w, hair, model = face_skin(work, wlm, outline=outline)
+    skin_w, hair, model = face_skin(work, wlm, outline=profile_outline(wlm, SKIN_FOREHEAD_REACH))
     soft = max(0.7, 0.004 * face_width(wlm))
+    if ai_skin is not None:
+        sure = _smoothstep(_map_into(ai_skin, (0, 0, 1, 1), box, full_shape, work.shape[:2]), *AI_SKIN_SURE)
+        dark = DARK_MARGIN * AI_SKIN_DARK
+        shaded = _smoothstep(work[..., 0], model.L_low - dark, model.L_low - dark / 3)
+        region = face_region(work.shape[:2], wlm, outline=profile_outline(wlm, SKIN_FOREHEAD_REACH))
+        # The model calls a beard face skin, and the stubble test is weaker
+        # in shadow: near the stubble it finds, the colour test still decides
+        # (beard on the shadow side of P1167822's face came in otherwise).
+        near_beard = np.clip(blur(hair, max(0.7, AI_SKIN_BEARD * face_width(wlm))) * 3, 0, 1)
+        skin_w = np.maximum(skin_w, region * sure * shaded * (1 - near_beard))
     W = blur(skin_w * (1 - hair), soft)
     # Even tone works on the whole face (not eyes, brows, lips, facial
     # hair or anything too dark to be skin) without the colour test: a
@@ -894,13 +929,18 @@ def _face_weights(work, scale, lm, box, full_shape, edits, head_hair):
         _poly_mask(work.shape[:2], cv2.convexHull(wlm[NOSE_AREA].astype(np.float32))[:, 0]),
         NOSE_FEATHER * face_width(wlm),
     )
-    W = np.maximum(W, nose * W_even)
+    # (Its own map, not W_even's: on a side profile the nose is past the outline.)
+    nose = nose * _lit(work, model.L_low) * (1 - hair)
+    if head_hair is not None:
+        nose = nose * (1 - on_hair)
+    W = np.maximum(W, nose)
+    W_even = np.maximum(W_even, nose)
     W = region_edit.apply(W, edits or [], (h, w), box)
     W_even = region_edit.apply(W_even, edits or [], (h, w), box)
     return W, W_even, model, wlm
 
 
-def acne_masks(rgb, faces, amount, edits=None, head_hair=None) -> list[tuple]:
+def acne_masks(rgb, faces, amount, edits=None, head_hair=None, ai_skin=None) -> list[tuple]:
     """Each face's Acne spot map, found at full detail: (frac_box, map),
     ``frac_box`` the face's crop as fractions of the image. The preview is too
     small to see small spots (a face can be 350 px wide there), so the preview
@@ -914,7 +954,7 @@ def acne_masks(rgb, faces, amount, edits=None, head_hair=None) -> list[tuple]:
         s = min(1.0, WORK_FW / fw, WORK_EDGE / max(lab.shape[:2]))
         work = lab if s == 1 else cv2.resize(lab, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
         scale = np.array([work.shape[1] / lab.shape[1], work.shape[0] / lab.shape[0]], np.float32)
-        W, W_even, _model, _wlm = _face_weights(work, scale, lm, box, (h, w), edits, head_hair)
+        W, W_even, _model, _wlm = _face_weights(work, scale, lm, box, (h, w), edits, head_hair, ai_skin)
         spots = acne_spots(work, W, fw * scale[0], amount, W_even)
         out.append(((x0 / w, y0 / h, x1 / w, y1 / h), spots))
     return out
@@ -927,6 +967,7 @@ def apply(
     edits: list[dict] | None = None,
     head_hair: np.ndarray | None = None,
     acne: list[tuple] | None = None,
+    ai_skin: np.ndarray | None = None,
 ) -> np.ndarray:
     """Face skin tools on every face. rgb float32 HxWx3 0..1; faces are
     landmark arrays as fractions of width/height. ``edits``: the user's
@@ -934,7 +975,9 @@ def apply(
     person-parts model's hair probability (any size, the photo's shape), to
     keep Acne and Even tone off hair over the skin (a fringe). ``acne``: spot
     maps found at full detail (see acne_masks), used instead of finding
-    spots here. Returns a new rgb."""
+    spots here. ``ai_skin``: the person-parts model's face skin (as
+    ``head_hair``), taken as skin where the colour test misses shadows.
+    Returns a new rgb."""
     p = RegionParams.from_dict(face_params)
     out = rgb.copy()
     if p.is_noop():
@@ -943,7 +986,7 @@ def apply(
     for lm, fw, box in _face_boxes((h, w), faces):
 
         def weights(work, scale, lm=lm, box=box):
-            W, W_even, model, wlm = _face_weights(work, scale, lm, box, (h, w), edits, head_hair)
+            W, W_even, model, wlm = _face_weights(work, scale, lm, box, (h, w), edits, head_hair, ai_skin)
             spots = None
             if acne and p.acne > 0:
                 spots = np.zeros(work.shape[:2], np.float32)
@@ -968,7 +1011,11 @@ def apply(
 
 
 def face_area(
-    rgb: np.ndarray, faces: list[np.ndarray], edits: list[dict] | None = None, head_hair: np.ndarray | None = None
+    rgb: np.ndarray,
+    faces: list[np.ndarray],
+    edits: list[dict] | None = None,
+    head_hair: np.ndarray | None = None,
+    ai_skin: np.ndarray | None = None,
 ) -> np.ndarray:
     """Where the Face tools work (0..1, the image's size): each face's skin as
     the tools see it (``_face_weights``, hair kept out), with the user's
@@ -978,7 +1025,7 @@ def face_area(
     for lm, _fw, box in _face_boxes((h, w), faces):
         x0, y0, x1, y1 = box
         lab = cv2.cvtColor(np.clip(rgb[y0:y1, x0:x1], 0, 1).astype(np.float32), cv2.COLOR_RGB2Lab)
-        W, _W_even, _model, _wlm = _face_weights(lab, 1.0, lm, box, (h, w), edits, head_hair)
+        W, _W_even, _model, _wlm = _face_weights(lab, 1.0, lm, box, (h, w), edits, head_hair, ai_skin)
         area[y0:y1, x0:x1] = np.maximum(area[y0:y1, x0:x1], W)
     return area
 

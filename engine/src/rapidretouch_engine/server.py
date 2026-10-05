@@ -13,6 +13,7 @@ import base64
 import io
 import json
 import os
+import queue
 import sys
 import threading
 import traceback
@@ -24,9 +25,9 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import imageio, presets, system
+from . import imageio, interrupt, presets, system
 from .registry import LicenceNotAccepted, Registry
-from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, scene, tone
+from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, relight, scene, tone
 from .tools import crop as crop_tool
 from .tools import eyes as eye_tool
 from .tools import mouth as mouth_tool
@@ -59,6 +60,7 @@ MASK_KEEP_SHARE = 0.03  # film-strip photos' subject masks kept, 8-bit (see open
 BACKDROP_KEEP_SHARE = 0.08  # the whole smoothed photo is kept if it's at most this share (see _full_pipeline)
 METHODS = {
     "ping",
+    "relight_default",
     "models",
     "accept_licence",
     "open",
@@ -102,9 +104,23 @@ def _jpeg_b64(rgb: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+RELIGHT_MARGIN = 1.35  # a new relight ellipse is this much bigger than the face: the fade starts inside
+
+
+class Superseded(Exception):
+    """A full-detail render given up because the app has asked for something
+    newer (a slider moved): see ``Engine._checkpoint``."""
+
+
 class Engine:
     def __init__(self, emit):
         self.emit = emit
+        # Whether a request is waiting behind the current one (set by serve),
+        # and whether the current one may give way to it (render_region only).
+        self.newer_waiting = lambda: False
+        self._yielding = False
+        self._veil = None  # the photo's haze, for Dehaze (see _tone)
+        interrupt.check = self._checkpoint
         self.registry = Registry()
         self.registry.status = self.status
         self.path: Path | None = None
@@ -238,6 +254,7 @@ class Engine:
         self._parts = None
         self._acne = None
         self._iris_scale = None
+        self._veil = None
         self._zoom_tiles, self._face_window_cache = [], {}
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
@@ -264,6 +281,7 @@ class Engine:
             "bit_depth": self.image.bit_depth,
             "preview": _jpeg_b64(self.preview),
             "removals": len(self.strokes),
+            "removal_kinds": self._removal_kinds(),
             "mask_edits": len(self.mask_edits),
             "region_edits": {r: len(v) for r, v in self.region_edits.items()},
         }
@@ -377,9 +395,9 @@ class Engine:
         h, w = rgb.shape[:2]
         found_key = (self.edit_version, self.mask_version)
         if region == "face":
-            return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"], self._part("hair"))
+            return skin_tool.face_area(rgb, self._ensure_faces(), self.region_edits["face"], self._covering(), self._part("face_skin"))
         if region == "dodge_burn":
-            return dodge_burn.area(rgb, self._ensure_faces(), self._part("hair"), self.region_edits["dodge_burn"])
+            return dodge_burn.area(rgb, self._ensure_faces(), self._covering(), self.region_edits["dodge_burn"])
         self._ensure_mask()
         if region == "clothes":
             self._creases(rgb, self.alpha_preview, 0.0, self._preview_cache, found_key)
@@ -446,6 +464,9 @@ class Engine:
         # Each face panel's overall amount (0..1): its result blended back
         # toward the photo before it, like a layer's opacity.
         "opacity": None,  # {"skin", "dodge_burn", "eyes", "mouth": 0..1}
+        # A radial gradient that relights the face (see tools/relight.py),
+        # applied with the tone: per-pixel, after the retouching.
+        "relight": None,
     }
 
     def _look(self, look: dict) -> dict:
@@ -463,6 +484,45 @@ class Engine:
         return {
             "preview": self._preview(look),
             "faces": len(self.faces) if self.faces is not None else None,
+        }
+
+    def _tone(self, look: dict) -> dict | None:
+        """The look's tone, with this photo's haze veil for Dehaze (measured
+        once, from the preview, so the preview, zoomed-in views and the
+        export all take off the same)."""
+        t = look["tone"]
+        if not t or not float(t.get("dehaze", 0)):
+            return t
+        if self._veil is None:
+            self._veil = tone.haze_veil(self.preview)
+        return {**t, "veil": self._veil}
+
+    def relight_default(self) -> dict:
+        """Where a new relight ellipse goes: over the biggest face, a little
+        larger than it and turned with it (see tools/relight.py), or the
+        middle of the photo when there's no face."""
+        self._require_image()
+        h, w = self.preview.shape[:2]
+        faces = self._ensure_faces()
+        if not faces:
+            return {"cx": 0.5, "cy": 0.45, "rx": 0.22, "ry": 0.28, "angle": 0.0}
+        lms = [f[:, :2] * np.array([w, h], np.float32) for f in faces]
+        lm = max(lms, key=skin_tool.face_width)
+        oval = skin_tool.forehead_outline(lm)
+        centre = oval.mean(0)
+        eyes = lm[263] - lm[33]  # outer eye corners, image-left to right
+        angle = float(np.degrees(np.arctan2(eyes[1], eyes[0])))
+        a = np.radians(angle)
+        across = np.array([np.cos(a), np.sin(a)], np.float32)
+        down = np.array([-np.sin(a), np.cos(a)], np.float32)
+        rel = oval - centre
+        long_edge = max(h, w)
+        return {
+            "cx": float(centre[0] / w),
+            "cy": float(centre[1] / h),
+            "rx": float(np.abs(rel @ across).max() * RELIGHT_MARGIN / long_edge),
+            "ry": float(np.abs(rel @ down).max() * RELIGHT_MARGIN / long_edge),
+            "angle": angle,
         }
 
     def iris_scale(self) -> dict:
@@ -504,7 +564,7 @@ class Engine:
         self.filled_previews.append(self._apply_stroke(base, stroke))
         self.strokes.append(stroke)
         self.edit_version += 1
-        return {"preview": self._preview(look), "removals": len(self.strokes)}
+        return {"preview": self._preview(look), "removals": len(self.strokes), "removal_kinds": self._removal_kinds()}
 
     def undo_remove(self, **look) -> dict:
         self._require_image()
@@ -512,13 +572,35 @@ class Engine:
             self.strokes.pop()
             self.filled_previews.pop()
             self.edit_version += 1
-        return {"preview": self._preview(look), "removals": len(self.strokes)}
+        return {"preview": self._preview(look), "removals": len(self.strokes), "removal_kinds": self._removal_kinds()}
 
-    def clear_removals(self, **look) -> dict:
+    def _removal_kinds(self) -> dict[str, int]:
+        """How many removals of each kind ("fill", "reflection", "patch")."""
+        counts: dict[str, int] = {}
+        for stroke in self.strokes:
+            kind = stroke.get("kind", "fill")
+            counts[kind] = counts.get(kind, 0) + 1
+        return counts
+
+    def clear_removals(self, kind: str | None = None, **look) -> dict:
+        """Undo every removal, or (``kind``) only the Brush ("fill"), Glasses
+        ("reflection") or Patch ones. Each removal was made on the photo as the
+        ones before it left it, so the others after the first one cleared are
+        made again (those before it are kept as they are)."""
         self._require_image()
-        self.strokes, self.filled_previews = [], []
-        self.edit_version += 1
-        return {"preview": self._preview(look), "removals": 0}
+        clear = lambda st: kind is None or st.get("kind", "fill") == kind  # noqa: E731
+        first = next((i for i, st in enumerate(self.strokes) if clear(st)), len(self.strokes))
+        strokes, previews = self.strokes[:first], self.filled_previews[:first]
+        rest = [st for st in self.strokes[first:] if not clear(st)]
+        if rest:
+            self.status("Redoing the other removals")
+        for st in rest:
+            previews.append(self._apply_stroke(previews[-1] if previews else self.preview, st))
+            strokes.append(st)
+        if len(strokes) != len(self.strokes):
+            self.strokes, self.filled_previews = strokes, previews
+            self.edit_version += 1
+        return {"preview": self._preview(look), "removals": len(self.strokes), "removal_kinds": self._removal_kinds()}
 
     def _crease_amount(self, look: dict) -> float:
         return float((look["clothes"] or {}).get("creases", 0))
@@ -566,8 +648,15 @@ class Engine:
         key = json.dumps([amount, edits])
         if self._acne is None or self._acne[0] != key:
             self.status("Finding spots")
-            self._acne = (key, skin_tool.acne_masks(self.image.rgb, self._ensure_faces(), amount, edits, self._part("hair")))
+            self._acne = (key, skin_tool.acne_masks(self.image.rgb, self._ensure_faces(), amount, edits, self._covering(), self._part("face_skin")))
         return self._acne[1]
+
+    def _covering(self) -> np.ndarray:
+        """What covers the face and isn't skin: hair, and accessories (a hat's
+        brim and underside, glasses frames, headbands), by the person-parts
+        model. The face tools keep off it. (A hat in shadow passed the skin
+        colour test once the face outline reached the hairline.)"""
+        return np.maximum(self._part("hair"), self._part("others"))
 
     def _clothes(self) -> np.ndarray:
         return self._part("clothes")
@@ -637,12 +726,14 @@ class Engine:
         opacity = lambda group: float(np.clip(opacities.get(group, 1.0), 0, 1))  # noqa: E731
         if frame is None:
             faces = self._ensure_faces
-            hair = lambda: self._part("hair")  # noqa: E731
+            hair = lambda: self._covering()  # noqa: E731
+            ai_skin = lambda: self._part("face_skin")  # noqa: E731
             framed_edits = lambda edits: edits  # noqa: E731
         else:
             box, full_shape = frame
             faces = lambda: _frame_faces(self._ensure_faces(), box, full_shape)  # noqa: E731
-            hair = lambda: _frame_map(self._part("hair"), box, full_shape)  # noqa: E731
+            hair = lambda: _frame_map(self._covering(), box, full_shape)  # noqa: E731
+            ai_skin = lambda: _frame_map(self._part("face_skin"), box, full_shape)  # noqa: E731
             framed_edits = lambda edits: _frame_edits(edits, box, full_shape)  # noqa: E731
         stages = []
         skin = look["skin"] or {}
@@ -656,7 +747,7 @@ class Engine:
                 acne = None
                 if face_p.acne > 0 and frame is None and rgb.shape[1] < self.image.rgb.shape[1]:
                     acne = self._acne_masks(face_p.acne, face_edits)
-                rgb = skin_tool.apply(rgb, faces(), skin.get("face"), framed_edits(face_edits), hair(), acne)
+                rgb = skin_tool.apply(rgb, faces(), skin.get("face"), framed_edits(face_edits), hair(), acne, ai_skin())
                 if steps is not None:
                     steps.append({"tool": "skin", "face": asdict(face_p), "area_edits": face_edits,
                                   "faces": len(self.faces), "models": landmarks()})
@@ -719,6 +810,7 @@ class Engine:
         face = None if body else self._face_window()
         if face is None:
             for _name, settings, run in self._face_stages(look, people):
+                self._checkpoint()
                 op = settings.get("opacity", 1.0)
                 out = run(rgb, steps)
                 if op < 1 and steps:
@@ -731,6 +823,7 @@ class Engine:
             return rgb
         crop = np.array(rgb[y0:y1, x0:x1], np.float32)
         for _name, settings, run in stages:
+            self._checkpoint()
             op = settings.get("opacity", 1.0)
             out = run(crop, steps)
             if op < 1 and steps:
@@ -739,6 +832,17 @@ class Engine:
         rgb = rgb.copy()
         rgb[y0:y1, x0:x1] = crop
         return rgb
+
+    def _checkpoint(self) -> None:
+        """Between the steps of a full-detail render: give up if the app is
+        waiting on something newer. On a laptop without a graphics card a
+        whole-photo detail render takes several seconds, and the engine does
+        one thing at a time, so a slider moved meanwhile waited for all of it
+        (the detail is asked for whenever the sliders pause, and at fit on a
+        high-resolution screen). Finished steps stay cached, so asking again
+        carries on from there."""
+        if self._yielding and self.newer_waiting():
+            raise Superseded("superseded by a newer request")
 
     def _staged(
         self, rgb, base_key, stages: list[tuple[str, dict, object]], cache=None, size=STAGE_CACHE_SIZE, budget=None
@@ -783,6 +887,7 @@ class Engine:
         if img is None:
             img = rgb()
         for i in range(start, len(stages)):
+            self._checkpoint()
             raw_key, key, op = entries[i]
             raw = take(raw_key) if op < 1 else None
             if raw is None:
@@ -808,7 +913,8 @@ class Engine:
         exposure or the curve only re-applies the tone.
         """
         key = json.dumps(
-            [{**look, "tone": None}, self.edit_version, self.mask_version, self.region_edits], sort_keys=True
+            [{**look, "tone": None, "relight": None}, self.edit_version, self.mask_version, self.region_edits],
+            sort_keys=True,
         )
         img = self._pretone.pop(key, None)  # re-inserted below: LRU order
         if img is None:
@@ -816,7 +922,7 @@ class Engine:
             if len(self._pretone) >= 2:
                 self._pretone.pop(next(iter(self._pretone)))
         self._pretone[key] = img
-        return tone.apply(img, look["tone"])
+        return tone.apply(relight.apply(img, look["relight"]), self._tone(look))
 
     def _render_retouch(self, look: dict) -> np.ndarray:
         """The preview up to (not including) the tone."""
@@ -889,7 +995,7 @@ class Engine:
         # Cached before the tone: the tone is per-pixel, so it's applied to just
         # the crop, and moving the exposure or curve never re-renders. A little
         # more than the view is rendered, so small pans are only a crop.
-        untoned = {**look, "tone": None}
+        untoned = {**look, "tone": None, "relight": None}
         key = json.dumps(
             [untoned, self.strokes, self.mask_edits, self.region_edits, self.mask_model], sort_keys=True
         )
@@ -901,7 +1007,11 @@ class Engine:
             self.status("Rendering full-resolution detail")
             px, py = round((x1 - x0) * ZOOM_SPARE), round((y1 - y0) * ZOOM_SPARE)
             area = (max(0, x0 - px), max(0, y0 - py), min(w, x1 + px), min(h, y1 + py))
-            hit = (key, area, self._zoom_area(untoned, area))
+            self._yielding = True
+            try:
+                hit = (key, area, self._zoom_area(untoned, area))
+            finally:
+                self._yielding = False
             self._zoom_tiles = [t for t in self._zoom_tiles if t[0] == key][-(ZOOM_TILES - 1):] + [hit]
         _key, (ax0, ay0, _ax1, _ay1), pixels = hit
         crop = pixels[y0 - ay0 : y1 - ay0, x0 - ax0 : x1 - ax0]
@@ -909,7 +1019,8 @@ class Engine:
         if scale < 1:
             size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
             crop = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
-        crop = tone.apply(crop, look["tone"])
+        crop = relight.apply(crop, look["relight"], (x0, y0, x1, y1), (h, w))
+        crop = tone.apply(crop, self._tone(look))
         return {"image": _jpeg_b64(crop), "region": [x0, y0, x1, y1]}
 
     def export(
@@ -1069,6 +1180,7 @@ class Engine:
             return backdrop_smooth.smooth_area(edited, alpha, p, light, area)
 
         out = np.array(smoothed(box), np.float32)
+        self._checkpoint()
         face = self._face_window() if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")) else None
         if face is not None:
             ix0, iy0 = max(x0, face[0]), max(y0, face[1])
@@ -1131,7 +1243,9 @@ class Engine:
 
         if any(look[k] for k in ("skin", "dodge_burn", "eyes", "mouth")):
             self.status("Retouching the face at full resolution")
+        self._checkpoint()
         rgb = self._face_tools(rgb, look, people, steps)
+        self._checkpoint()
 
         # Creases last, as in the preview (see ``_render_retouch``).
         amount = self._crease_amount(look)
@@ -1153,8 +1267,11 @@ class Engine:
                 }
             )
 
+        if look["relight"] is not None and not relight.Params.from_dict(look["relight"]).is_noop():
+            rgb = relight.apply(rgb, look["relight"])
+            steps.append({"tool": "relight", "params": look["relight"]})
         if not tone.is_noop(look["tone"]):
-            rgb = tone.apply(rgb, look["tone"])
+            rgb = tone.apply(rgb, self._tone(look))
             steps.append({"tool": "tone", "params": look["tone"]})
 
         return rgb, steps
@@ -1183,19 +1300,30 @@ def serve() -> None:
     # being edited (each is ~0.3 s of RAW decoding, much of it outside the GIL).
     # One thread: a second made thumbnails faster but slowed renders by ~0.1 s.
     background = ThreadPoolExecutor(max_workers=1)
+    # Requests are read on a thread of their own, so a long full-detail
+    # render can see that a newer one is waiting and give way to it.
+    waiting: queue.Queue = queue.Queue()
+
+    def read() -> None:
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            try:
+                req = json.loads(line)
+            except Exception as e:
+                emit({"id": None, "error": {"message": str(e)}})
+                continue
+            if req.get("method") in BACKGROUND:
+                background.submit(_handle, engine, req, emit)
+            else:
+                waiting.put(req)
+        waiting.put(None)  # the app has gone
+
+    engine.newer_waiting = lambda: not waiting.empty()
+    threading.Thread(target=read, daemon=True).start()
     emit({"event": "ready"})
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            req = json.loads(line)
-        except Exception as e:
-            emit({"id": None, "error": {"message": str(e)}})
-            continue
-        if req.get("method") in BACKGROUND:
-            background.submit(_handle, engine, req, emit)
-        else:
-            _handle(engine, req, emit)
+    while (req := waiting.get()) is not None:
+        _handle(engine, req, emit)
 
 
 # Export progress: which steps run depends on the photo and its settings, so
@@ -1258,6 +1386,8 @@ def _handle(engine: Engine, req: dict, emit) -> None:
             raise ValueError(f"unknown method {method!r}")
         result = getattr(engine, method)(**req.get("params", {}))
         emit({"id": req_id, "result": result})
+    except Superseded as e:
+        emit({"id": req_id, "error": {"message": str(e), "kind": "superseded"}})
     except LicenceNotAccepted as e:
         emit(
             {

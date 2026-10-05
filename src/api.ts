@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 
 export interface EngineError {
   message: string;
-  kind?: "licence";
+  // "superseded": a full-detail render the engine gave up for a newer request
+  kind?: "licence" | "superseded";
   model?: string;
   licence?: string;
   licence_url?: string;
@@ -15,6 +16,7 @@ export interface OpenResult {
   bit_depth: number;
   preview: string; // base64 JPEG
   removals: number; // restored when switching back to a photo
+  removal_kinds: Record<string, number>; // how many of each: fill, reflection, patch
   mask_edits: number;
 }
 

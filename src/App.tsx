@@ -25,6 +25,7 @@ import {
   Lasso,
   Crop as CropIcon,
   GripVertical,
+  Circle,
 } from "lucide-react";
 import {
   BackdropParams,
@@ -47,6 +48,7 @@ import OpacityGroup from "./OpacityGroup";
 import PaintOverlay from "./PaintOverlay";
 import PatchOverlay from "./PatchOverlay";
 import CropOverlay, { Crop, NO_CROP, cropToRatio, fitCrop, isNoCrop } from "./CropOverlay";
+import RelightOverlay, { RelightShape } from "./RelightOverlay";
 import CurveEditor, { IDENTITY, Point } from "./CurveEditor";
 import PresetMenu, { Preset } from "./PresetMenu";
 import Slider from "./Slider";
@@ -65,7 +67,14 @@ interface PhotoSettings {
   tone: Tone;
   crop: Crop; // straighten and crop, applied at export; not part of presets
   opacity: Opacity; // each face panel's overall amount
+  relight: Relight | null; // placed on this photo's face, so not part of presets
 }
+/** Relight: a radial gradient over the face (see RelightOverlay and the
+ * engine's tools/relight.py). */
+type Relight = RelightShape & { feather: number; exposure: number; warmth: number; invert: boolean };
+const RELIGHT_LOOK = { feather: 0.6, exposure: 0.5, warmth: 0, invert: false };
+/** The engine's relight setting: null while it would change nothing. */
+const relightLook = (r: Relight | null) => (r && (r.exposure !== 0 || r.warmth !== 0) ? r : null);
 /** Each face panel's overall amount (0..1): its whole result faded toward the
  * photo before it, like a layer's opacity. */
 interface Opacity {
@@ -79,10 +88,11 @@ interface Tone {
   temperature: number; // -1 bluer .. +1 warmer
   tint: number; // -1 greener .. +1 more magenta
   ev: number;
+  dehaze: number; // -1 hazier .. +1 clearer (the photo's own haze veil taken off)
   vibrance: number; // -1 .. +1, skin tones protected, dull colours gain most (like Lightroom's)
   curve: Point[]; // luminosity curve
 }
-const TONE_DEFAULTS: Tone = { temperature: 0, tint: 0, ev: 0, vibrance: 0, curve: IDENTITY };
+const TONE_DEFAULTS: Tone = { temperature: 0, tint: 0, ev: 0, dehaze: 0, vibrance: 0, curve: IDENTITY };
 // Colour bars for the white balance sliders.
 const TEMPERATURE_SCALE = "linear-gradient(to right, #4a86d8, #b9c3cf, #e0a74a)";
 const TINT_SCALE = "linear-gradient(to right, #5fae58, #c0c0c0, #c45cb8)";
@@ -273,7 +283,8 @@ type Step =
   | "skin_body"
   | "dodge_burn"
   | "eyes"
-  | "mouth";
+  | "mouth"
+  | "relight";
 const STEP_NAMES: Record<Step, string> = {
   removals: "removals",
   backdrop: "backdrop",
@@ -286,6 +297,7 @@ const STEP_NAMES: Record<Step, string> = {
   clothes: "clothes",
   tone: "tone",
   dodge_burn: "dodge & burn",
+  relight: "relight",
 };
 
 /** Press-and-hold handlers. The pointer is captured while pressed, so only
@@ -315,6 +327,7 @@ const withoutStep = (look: Record<string, unknown>, step: Step): Record<string, 
 
 // Brush modes: the Remove panel's (LaMa fill, glasses reflection, patch).
 type BrushMode = "fill" | "reflection" | "patch";
+const BRUSH_NAMES: Record<BrushMode, string> = { fill: "brush", reflection: "glasses", patch: "patch" };
 const BRUSH_COLOURS: Record<BrushMode, string | undefined> = {
   fill: undefined, // PaintOverlay's red
   reflection: "rgba(64, 200, 255, 0.45)",
@@ -416,10 +429,16 @@ const ALL_DEFAULTS: PhotoSettings = {
   tone: TONE_DEFAULTS,
   crop: NO_CROP,
   opacity: OPACITY_DEFAULTS,
+  relight: null,
 };
 /** A preset's settings as full PhotoSettings: anything the preset doesn't have
  * (a slider added since it was saved) takes its default. */
-function withPreset(saved: Record<string, unknown>, outdoor: boolean, crop: Crop = NO_CROP): PhotoSettings {
+function withPreset(
+  saved: Record<string, unknown>,
+  outdoor: boolean,
+  crop: Crop = NO_CROP,
+  relight: Relight | null = null,
+): PhotoSettings {
   const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
   const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
   const skin = obj(saved.skin);
@@ -447,11 +466,13 @@ function withPreset(saved: Record<string, unknown>, outdoor: boolean, crop: Crop
       temperature: num(tone.temperature, 0),
       tint: num(tone.tint, 0),
       ev: num(tone.ev, 0),
+      dehaze: num(tone.dehaze, 0),
       vibrance: num(tone.vibrance, 0),
       curve: Array.isArray(tone.curve) ? (tone.curve as Point[]) : IDENTITY,
     },
     crop,
     opacity: { ...OPACITY_DEFAULTS, ...(obj(saved.opacity) as Partial<Opacity>) },
+    relight,
   };
 }
 
@@ -521,8 +542,8 @@ const RAW_EXTENSIONS = [
 // Brush radius as a fraction of the image's long edge.
 const COLLAPSED_KEY = "rapidretouch.collapsedPanels";
 // Hold-for-before steps in the sidebar's order, top to bottom.
-const PANEL_STEPS: Step[] = ["removals", "tone", "backdrop", "skin", "dodge_burn", "eyes", "mouth", "clothes"];
-const PANEL_IDS = ["remove", "tone", "backdrop", "skin", "dodge_burn", "eyes", "mouth", "clothes"];
+const PANEL_STEPS: Step[] = ["removals", "tone", "backdrop", "skin", "dodge_burn", "relight", "eyes", "mouth", "clothes"];
+const PANEL_IDS = ["remove", "tone", "backdrop", "skin", "dodge_burn", "relight", "eyes", "mouth", "clothes"];
 
 // Zoomed in: wait this long after the preview last changed before asking for
 // the sharp full-resolution tile (see the detail effect).
@@ -655,6 +676,11 @@ export default function App() {
     setCollapsed(saveCollapsed(allCollapsed ? new Set() : new Set(PANEL_IDS)));
   const [toneParams, setToneParams] = useState<Tone>(TONE_DEFAULTS);
   const [skinTab, setSkinTab] = useState<SkinTab>("face");
+  // Opening the Skin panel always starts on Face, the tab used most.
+  const skinOpen = !collapsed.has("skin");
+  useEffect(() => {
+    if (skinOpen) setSkinTab("face");
+  }, [skinOpen]);
   const [faces, setFaces] = useState<number | null>(null);
   const [maskModel, setMaskModel] = useState<ModelInfo | null>(null);
   const [licencePrompt, setLicencePrompt] = useState<EngineError | null>(null);
@@ -665,6 +691,8 @@ export default function App() {
   // usually want a different size from spot removals.
   const [maskBrushRadius, setMaskBrushRadius] = useState(BRUSH.default * 2);
   const [removals, setRemovals] = useState(0);
+  // How many removals each Remove tool has made on this photo (its Clear button).
+  const [removalKinds, setRemovalKinds] = useState<Record<string, number>>({});
   const [brushMode, setBrushMode] = useState<BrushMode>("fill");
   const [reflectionStrength, setReflectionStrength] = useState(1);
   const [removing, setRemoving] = useState(false);
@@ -757,6 +785,10 @@ export default function App() {
   const [crop, setCrop] = useState<Crop>(NO_CROP);
   const [opacity, setOpacity] = useState<Opacity>(OPACITY_DEFAULTS);
   const opacityRef = useRef(opacity);
+  const [relight, setRelight] = useState<Relight | null>(null);
+  const relightRef = useRef(relight);
+  // Showing the ellipse's handles to move, stretch and turn it.
+  const [relightEditing, setRelightEditing] = useState(false);
   // Iris hue's colour bar for the open photo's eyes (null: the blue-eye default).
   const [irisScale, setIrisScale] = useState<string[] | null>(null);
   const irisScaleFor = useRef<string | null>(null);
@@ -848,6 +880,7 @@ export default function App() {
     clothes: creasesRef.current > 0 ? { creases: creasesRef.current } : null,
     tone: sameValues(toneRef.current, TONE_DEFAULTS) ? null : toneRef.current,
     opacity: opacityRef.current,
+    relight: relightLook(relightRef.current),
   });
   /** The same, for any photo's settings (batch export). */
   const lookArgsFor = (st: PhotoSettings): Record<string, unknown> => ({
@@ -859,6 +892,7 @@ export default function App() {
     clothes: st.creases > 0 ? { creases: st.creases } : null,
     tone: sameValues(st.tone, TONE_DEFAULTS) ? null : st.tone,
     opacity: st.opacity,
+    relight: relightLook(st.relight),
   });
 
   useEffect(() => {
@@ -960,6 +994,7 @@ export default function App() {
         if (activePath.current === path) {
           setImage({ ...r, path });
           setRemovals(r.removals);
+          setRemovalKinds(r.removal_kinds ?? {});
           setMaskEdits(r.mask_edits);
         }
         saveLastDir(path.replace(/\/[^/]*$/, ""));
@@ -1093,6 +1128,25 @@ export default function App() {
     render();
   };
 
+  const updateRelight = (next: Relight | null) => {
+    relightRef.current = next;
+    setRelight(next);
+    if (!next) setRelightEditing(false);
+    render();
+  };
+  /** A new relight, over the face (the engine finds it). */
+  const addRelight = async () => {
+    try {
+      if (!(await ensureOpen())) return;
+      const shape = await call<RelightShape>("relight_default");
+      setBrushOn(false);
+      setRelightEditing(true);
+      updateRelight({ ...shape, ...RELIGHT_LOOK });
+    } catch (e) {
+      handleError(e);
+    }
+  };
+
   // Crop only changes the export, so there's nothing to re-render.
   const updateCrop = (next: Crop) => {
     cropRef.current = next;
@@ -1145,12 +1199,16 @@ export default function App() {
       setBusy(true);
       try {
         if (!(await ensureOpen())) return;
-        const r = await call<{ preview: string; removals: number }>(method, {
+        const r = await call<{ preview: string; removals: number; removal_kinds: Record<string, number> }>(method, {
           ...extra,
           ...lookArgs(),
         });
         setResult(r.preview);
         setRemovals(r.removals);
+        setRemovalKinds(r.removal_kinds ?? {});
+        if (openedInfo.current) {
+          openedInfo.current = { ...openedInfo.current, removals: r.removals, removal_kinds: r.removal_kinds ?? {} };
+        }
         setStatus("Ready");
       } catch (e) {
         handleError(e);
@@ -1180,7 +1238,8 @@ export default function App() {
     setZoomTool(false);
   };
   const undoRemove = () => removalCall("undo_remove");
-  const clearRemovals = () => removalCall("clear_removals");
+  // Clear: only the selected Remove tool's removals (Undo still steps back through all of them).
+  const clearRemovals = () => removalCall("clear_removals", { kind: brushMode });
 
   // Keyboard: Ctrl+Z undoes a removal, B toggles the brush, [ and ] resize it.
   useEffect(() => {
@@ -1190,6 +1249,11 @@ export default function App() {
       if (image && cropping && (e.key === "Enter" || e.key === "Escape")) {
         e.preventDefault();
         setCropping(false);
+        return;
+      }
+      if (relightEditing && (e.key === "Enter" || e.key === "Escape")) {
+        e.preventDefault();
+        setRelightEditing(false);
         return;
       }
       if (!image || e.target instanceof HTMLInputElement) return;
@@ -1261,6 +1325,7 @@ export default function App() {
     tone: toneRef.current,
     crop: cropRef.current,
     opacity: opacityRef.current,
+    relight: relightRef.current,
   });
 
   const applySettings = (st: PhotoSettings) => {
@@ -1284,6 +1349,8 @@ export default function App() {
     setCrop(st.crop);
     opacityRef.current = st.opacity;
     setOpacity(st.opacity);
+    relightRef.current = st.relight ?? null;
+    setRelight(st.relight ?? null);
   };
 
   const markEdited = (path: string, st: PhotoSettings) =>
@@ -1306,6 +1373,10 @@ export default function App() {
       markEdited(current, currentSettings());
     }
     activePath.current = path;
+    if (current !== path) {
+      setSkinTab("face"); // Skin opens on Face for every photo
+      setRelightEditing(false);
+    }
     setPrep({ path, fraction: PREP_START });
     if (irisScaleFor.current !== path) setIrisScale(null);
     window.clearTimeout(openTimer.current);
@@ -1316,6 +1387,7 @@ export default function App() {
     setView("result");
     setFaces(null);
     setRemovals(0);
+    setRemovalKinds({});
     setMaskEdits(0);
     const saved = settingsByPath.current.get(path);
     applySettings(saved ?? ALL_DEFAULTS);
@@ -1325,6 +1397,7 @@ export default function App() {
     if (openedPath.current === path && openedInfo.current) {
       setImage(openedInfo.current);
       setRemovals(openedInfo.current.removals);
+      setRemovalKinds(openedInfo.current.removal_kinds ?? {});
       setMaskEdits(openedInfo.current.mask_edits);
       render();
       return;
@@ -1351,6 +1424,7 @@ export default function App() {
         bit_depth: 0, // not known until opened
         preview: q.image,
         removals: 0,
+        removal_kinds: {},
         mask_edits: 0,
       });
     } catch (e) {
@@ -1501,7 +1575,7 @@ export default function App() {
     return paths.length ? paths : image ? [image.path] : [];
   };
   const savePreset = async (name: string) => {
-    const { outdoor: _mode, crop: _crop, ...settings } = currentSettings();
+    const { outdoor: _mode, crop: _crop, relight: _relight, ...settings } = currentSettings();
     try {
       setPresets(await call<Preset[]>("save_preset", { name, settings }));
       setStatus(`Saved preset "${name}"`);
@@ -1532,7 +1606,7 @@ export default function App() {
               ...ALL_DEFAULTS,
               outdoor: strip.find((i) => i.path === path)?.scene === "outdoor",
             });
-      const st = withPreset(preset.settings, current.outdoor, current.crop);
+      const st = withPreset(preset.settings, current.outdoor, current.crop, current.relight ?? null);
       if (path === image?.path) {
         applySettings(st);
         render();
@@ -1671,6 +1745,8 @@ export default function App() {
         return !sameValues(mouthRef.current, MOUTH_DEFAULTS);
       case "clothes":
         return creasesRef.current > 0;
+      case "relight":
+        return relightLook(relightRef.current) !== null;
     }
   };
   const holdWithout = async (step: Step) => {
@@ -1741,12 +1817,22 @@ export default function App() {
         if (version === contentVersion.current && wantedRegion.current === want) setDetail(r);
       } while (detailDirty.current);
     } catch (e) {
-      handleError(e);
+      if ((e as EngineError)?.kind === "superseded") {
+        // The engine dropped it for a slider change: ask again once the
+        // sliders are still (its finished steps are kept).
+        const again = () => {
+          if (inFlight.current || dirty.current) window.setTimeout(again, DETAIL_AFTER_EDIT_MS);
+          else requestDetailRef.current();
+        };
+        window.setTimeout(again, DETAIL_AFTER_EDIT_MS);
+      } else handleError(e);
     } finally {
       detailInFlight.current = false;
       setDetailLoading(false);
     }
   }, [handleError]);
+  const requestDetailRef = useRef(requestDetail);
+  requestDetailRef.current = requestDetail;
 
   const onDetailNeeded = useCallback(
     (region: [number, number, number, number] | null, scale: number) => {
@@ -2014,6 +2100,17 @@ export default function App() {
                   onChange={updateCrop}
                 />
               )}
+              {image && view === "result" && !cropping && relight && relightEditing && (
+                <RelightOverlay
+                  image={imgEl}
+                  width={image.width}
+                  height={image.height}
+                  shape={relight}
+                  feather={relight.feather}
+                  editing={!panning && !zoomTool}
+                  onChange={(change) => updateRelight({ ...relightRef.current!, ...change })}
+                />
+              )}
               {image && view === "result" && !cropping && brushMode !== "patch" && (
                 <PaintOverlay
                   image={imgEl}
@@ -2235,11 +2332,11 @@ export default function App() {
               <Undo2 size={15} /> Undo
             </button>
             <button
-              disabled={!image || removals === 0 || removing}
+              disabled={!image || !removalKinds[brushMode] || removing}
               onClick={clearRemovals}
-              title="Undo every removal"
+              title={`Undo every ${BRUSH_NAMES[brushMode]} removal on this photo, keeping the others`}
             >
-              <Trash2 size={15} /> Clear
+              <Trash2 size={15} /> Clear {BRUSH_NAMES[brushMode]}
             </button>
           </div>
           <div className="panel__buttons">
@@ -2341,6 +2438,19 @@ export default function App() {
             format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)} EV`}
             disabled={!image}
             onChange={(v) => updateTone({ ...toneRef.current, ev: v })}
+          />
+          <Slider
+            label="Dehaze"
+            hint="Right: clear haze or a washed-out look (deeper blacks, more contrast and colour). Left: add a soft, misty haze"
+            min={-1}
+            max={1}
+            step={0.01}
+            centred
+            value={toneParams.dehaze}
+            defaultValue={0}
+            format={signed}
+            disabled={!image}
+            onChange={(v) => updateTone({ ...toneRef.current, dehaze: v })}
           />
           <Slider
             label="Vibrance"
@@ -2669,6 +2779,91 @@ export default function App() {
         </Panel>
 
         <Panel
+          title="Relight"
+          actions={
+            <ResetButton disabled={!image || !relight} onClick={() => updateRelight(null)} what="Relight" />
+          }
+          {...panel("relight")}
+        >
+          {!relight ? (
+            <>
+              <p className="panel__model">
+                A radial light over the face: brighten, darken, warm or cool it, fading out toward the
+                edge.
+              </p>
+              <div className="panel__buttons">
+                <button disabled={!image} onClick={addRelight} title="Place a radial light over the face">
+                  <Circle size={15} /> Add on face
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <Slider
+                label="Exposure"
+                hint="Brighten (or darken) the light, in stops (EV)"
+                min={-2}
+                max={2}
+                step={0.05}
+                centred
+                value={relight.exposure}
+                defaultValue={0}
+                format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)} EV`}
+                disabled={!image}
+                onChange={(v) => updateRelight({ ...relightRef.current!, exposure: v })}
+              />
+              <Slider
+                label="Warmth"
+                hint="Warmer (amber) or cooler (blue) light; brightness is kept"
+                min={-1}
+                max={1}
+                step={0.01}
+                centred
+                scale={TEMPERATURE_SCALE}
+                value={relight.warmth}
+                defaultValue={0}
+                format={signed}
+                disabled={!image}
+                onChange={(v) => updateRelight({ ...relightRef.current!, warmth: v })}
+              />
+              <Slider
+                label="Feather"
+                hint="How gradually the light fades out toward the edge of the circle: the dashed ring is where the fade starts (drag it in Edit circle)"
+                min={0}
+                max={1}
+                step={0.01}
+                value={relight.feather}
+                defaultValue={RELIGHT_LOOK.feather}
+                format={(v) => `${Math.round(v * 100)}`}
+                disabled={!image}
+                onChange={(v) => updateRelight({ ...relightRef.current!, feather: v })}
+              />
+              <div className="panel__buttons">
+                <button
+                  className={relightEditing ? "active" : ""}
+                  disabled={!image || view !== "result"}
+                  onClick={() => {
+                    if (!relightEditing) setBrushOn(false);
+                    setRelightEditing(!relightEditing);
+                  }}
+                  title="Show the circle: drag inside to move it, the edge handles to stretch it, the top handle to turn it, the dashed ring to change the feather (Enter when done)"
+                >
+                  <Circle size={15} /> {relightEditing ? "Done" : "Edit circle"}
+                </button>
+                <button
+                  disabled={!image || (view === "mask" || view === "area") || !relightLook(relight)}
+                  onPointerEnter={() => prefetchWithout("relight")}
+                  {...holdHandlers(() => holdWithout("relight"), releaseCompare)}
+                  title="Hold to see the photo without the relight"
+                >
+                  <Eye size={15} /> Hold for before
+                </button>
+              </div>
+            </>
+          )}
+        </Panel>
+
+        <Panel
           title="Eyes"
           actions={
             <ResetButton
@@ -2819,7 +3014,7 @@ export default function App() {
               ? {
                   ...i,
                   edited: !sameSettings(
-                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams, crop, opacity },
+                    { backdrop: params, outdoor, eyes: eyesParams, skin: skinParams, mouth: mouthParams, dodgeBurn, creases, tone: toneParams, crop, opacity, relight },
                     ALL_DEFAULTS,
                   ),
                 }

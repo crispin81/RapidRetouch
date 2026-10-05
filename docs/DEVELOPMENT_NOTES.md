@@ -399,10 +399,37 @@ GPU matters.
 
 ## 10. Backlog (not started unless asked)
 
-**For 1.0.1 (Chris, 2026-10-04):**
-- Side-profile faces: skin Texture (and likely the other skin tools) doesn't reach the nose enough. The
-  landmark-based nose area and face outline are probably off when the face is turned; check on a
-  profile shot.
+**Done for 1.0.1 (2026-10-05):**
+- Side profiles (P1024004): the face outline's far side runs down the cheek on a turned face and cut
+  off the nose, upper lip and front of the chin. The skin map and dodge & burn now use
+  `profile_outline` (the outline's hull with every landmark), which only colour-tested maps may use
+  (it takes in background in front of the lips); Even tone keeps the plain outline plus the nose.
+- Hats (DSC_2383-2): the outline raised to the hairline reached under a brim, whose shaded underside
+  passed the skin colour test. The face tools and dodge & burn keep off `Engine._covering()`: hair
+  plus the person-parts model's "others" (hats, glasses frames, headbands). Lenses stay in.
+- Shadowed skin (DSC_2409's chin, cheekbone shadows) failed the colour test: shadows are lit by
+  light of another colour and are noisier. Where the person-parts model is sure it's face skin
+  (`AI_SKIN_SURE`), that stands in for the colour test, down to twice the usual darkness margin.
+  Not near stubble the stubble test found (`AI_SKIN_BEARD`): the model calls a beard face skin, and
+  shadow-side beard came in on P1167822 without that.
+- Relight panel: a radial gradient placed over the biggest face (`relight_default`), Exposure, Warmth
+  and Feather, moved/stretched/turned/feathered by hand (`RelightOverlay`). No masking, by choice:
+  plain smoothstep falloff, as Lightroom's radial filter. Applied with the tone (per pixel, after
+  the retouching, left out of the cache keys), so its sliders never rerun anything. The engine
+  still supports `invert` (outside the circle); the UI button was taken out. Per photo: copy/paste
+  carries it, presets don't (like crop).
+- Dehaze (Tone): takes off the photo's own haze veil (`haze_veil`: the 0.5th percentile, linear
+  light, measured once per photo from the preview so preview, zoom and export match) plus a little
+  more, and gives back colour; below zero adds a mist. A fixed veil crushed low-key portraits.
+- Remove panel's Clear clears only the selected tool's removals (`clear_removals(kind)`), keeping
+  the others: those before the first cleared one are kept as they are, the rest are redone.
+- Skin opens on Face whenever the Skin panel is opened or the photo changes.
+- Slider lag on CPU-only laptops: the viewer asks for full detail whenever the sliders pause (and at
+  fit on a high-resolution screen), and a whole-photo detail render takes seconds without a graphics
+  card; the next slider change waited behind it. Requests are now read on their own thread, and a
+  detail render gives way between steps (`Engine._checkpoint`, and `interrupt.check()` between the
+  skin tools) as soon as anything newer is waiting; its finished steps stay cached. P1024004 on 8
+  cores: preview back 0.6 s after the move instead of ~2 s.
 
 - Background preparation: preload models at start-up and find mask, faces and hair while
   browsing (first preview 4.3 s → ~instant).

@@ -30,7 +30,7 @@ from . import region_edit
 from .colour import linear_to_srgb, srgb_to_linear
 from .eyes import EYES, _inner_feather, _poly_mask
 from .filters import blur, grow_mask, masked_blur
-from .skin import FACE_OVAL, HAIR_SURE, LIPS, _map_into, _smoothstep, _strands, face_skin, face_width, forehead_outline
+from .skin import FACE_OVAL, HAIR_SURE, LIPS, _map_into, _smoothstep, _strands, face_skin, face_width, profile_outline
 
 # The shape of the light, in face widths: finer than DETAIL is texture and
 # pores; broader than FORM is the fall-off of the light across the whole face,
@@ -192,7 +192,7 @@ def _dodge_burn(rgb, faces, p: Params, head_hair, edits, area_out: np.ndarray | 
         fw = face_width(lm)
         if fw < 40:
             continue
-        outline = forehead_outline(lm)
+        outline = profile_outline(lm)  # W below is colour-tested
         x0, y0 = np.maximum(np.floor(outline.min(0) - 0.2 * fw), 0).astype(int)
         x1, y1 = np.minimum(np.ceil(outline.max(0) + 0.2 * fw), [w, h]).astype(int)
         crop = np.clip(out[y0:y1, x0:x1], 0, 1)

@@ -109,6 +109,45 @@ def vibrance(rgb: np.ndarray, amount: float) -> np.ndarray:
     return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
 
 
+# Dehaze: haze is a veil of scattered light over everything, which lifts the
+# shadows and washes colour out. Dehaze takes such a veil off (in linear light,
+# so the blacks deepen and midtones gain contrast while whites stay white) and
+# gives back the colour; below zero it adds one, for a soft, misty look. Per
+# pixel, like the rest of the tone, so a zoomed-in view matches the photo.
+# The veil taken off is the photo's own: its darkest tones (``haze_veil``,
+# measured once per photo by the engine), so a misty landscape clears a lot and
+# a low-key portrait with true blacks only a little (a fixed veil crushed it).
+DEHAZE_PERCENTILE = 0.5  # the photo's darkest tones: what the haze has lifted them to
+DEHAZE_MIN = 0.003  # linear light: always this much more, so it does something
+DEHAZE_ADD = 0.03  # linear light added at -1
+DEHAZE_COLOUR = 0.15  # chroma gained (or lost) at either end
+
+
+def haze_veil(rgb: np.ndarray) -> list[float]:
+    """The haze over ``rgb`` (the whole photo, any size), per channel in
+    linear light: how far its darkest tones are lifted off black."""
+    lin = srgb_to_linear(np.clip(rgb[::4, ::4], 0, 1)).reshape(-1, 3)
+    return [float(v) for v in np.percentile(lin, DEHAZE_PERCENTILE, axis=0)]
+
+
+def dehaze(rgb: np.ndarray, amount: float, veil=None) -> np.ndarray:
+    """Dehaze (-1 hazier .. +1 clearer), see above. ``veil``: haze_veil of
+    the photo (after the exposure), or none."""
+    a = float(np.clip(amount, -1, 1))
+    lin = srgb_to_linear(rgb)
+    if a > 0:
+        v = a * (np.asarray(veil if veil is not None else [0, 0, 0], np.float32) + DEHAZE_MIN)
+        v = np.minimum(v, 0.5).astype(np.float32)
+        lin = (lin - v) / (1 - v)
+    else:
+        v = DEHAZE_ADD * -a
+        lin = lin * (1 - v) + v
+    out = linear_to_srgb(np.clip(lin, 0, 1)).astype(np.float32)
+    lab = cv2.cvtColor(out, cv2.COLOR_RGB2Lab)
+    lab[..., 1:] *= np.float32(1 + DEHAZE_COLOUR * a)
+    return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+
 def is_noop(params: dict | None) -> bool:
     if not params:
         return True
@@ -117,13 +156,14 @@ def is_noop(params: dict | None) -> bool:
         and float(params.get("temperature", 0)) == 0
         and float(params.get("tint", 0)) == 0
         and float(params.get("vibrance", 0)) == 0
+        and float(params.get("dehaze", 0)) == 0
         and curve_lut(params.get("curve")) is None
     )
 
 
 def apply(rgb: np.ndarray, params: dict | None) -> np.ndarray:
     """``params``: {"temperature": -1..1, "tint": -1..1, "ev": stops,
-    "vibrance": -1..1, "curve": [[x, y], ...] (lightness 0..1)}, applied in
+    "dehaze": -1..1, "vibrance": -1..1, "curve": [[x, y], ...] (lightness 0..1)}, applied in
     that order. Every step is per pixel, so it runs on all cores."""
     if is_noop(params):
         return rgb
@@ -138,6 +178,13 @@ def _apply(rgb: np.ndarray, params: dict) -> np.ndarray:
     ev = float(params.get("ev", 0))
     if ev:
         out = linear_to_srgb(np.clip(srgb_to_linear(out) * 2.0**ev, 0, 1)).astype(np.float32)
+    haze = float(params.get("dehaze", 0))
+    if haze:
+        # The veil was measured before the tone: scaled by the exposure with the photo.
+        veil = params.get("veil")
+        if veil is not None:
+            veil = np.asarray(veil, np.float32) * np.float32(2.0**ev)
+        out = dehaze(out, haze, veil)
     vib = float(params.get("vibrance", 0))
     if vib:
         out = vibrance(out, vib)
