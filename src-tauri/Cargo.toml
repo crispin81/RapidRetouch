@@ -1,6 +1,6 @@
 [package]
 name = "rapidretouch"
-version = "1.0.2"
+version = "1.0.3"
 description = "AI-assisted studio portrait retouching"
 authors = ["Chris Cork"]
 license = "AGPL-3.0-only"

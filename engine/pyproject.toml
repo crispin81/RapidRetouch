@@ -1,6 +1,6 @@
 [project]
 name = "rapidretouch-engine"
-version = "1.0.2"
+version = "1.0.3"
 description = "Image-processing and model-inference engine for RapidRetouch"
 readme = "README.md"
 authors = [

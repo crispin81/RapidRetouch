@@ -18,7 +18,7 @@ RapidTimelapse.
 
 **[⬇ Download the latest version](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
-- **2026-10-07 (next update):** JPEGs open the right way up, faces found in full-length and low-key shots, a Rotate 90° button, relight that follows each face when pasted or in a preset, true colours for iPhone and Adobe RGB JPEGs, and exports that keep the camera's information
+- **2026-10-07 (v1.0.3):** JPEGs open the right way up, faces found in full-length and low-key shots, a Rotate 90° button, relight that follows each face when pasted or in a preset, true colours for iPhone and Adobe RGB JPEGs, and exports that keep the camera's information
 - **2026-10-05 (v1.0.2):** Remove tools move to the top bar, an eye on each slider to switch it off, instant Opacity sliders, faster patching, a histogram behind the tone curve, and Acne finds spots it missed
 - **2026-10-05 (v1.0.1):** New Relight panel and Dehaze, face tools keep off hats, better side profiles, and faster sliders on laptops
 - **2026-10-04 (v1.0.0):** First release: installers for Windows, Mac and Linux with a one-time engine setup, AI models on an NVIDIA GPU, a Mac's GPU or the CPU, plus Pores and Blemishes sliders and panel Opacity
