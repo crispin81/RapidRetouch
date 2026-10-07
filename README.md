@@ -18,6 +18,7 @@ RapidTimelapse.
 
 **[⬇ Download the latest version](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
+- **2026-10-07 (next update):** JPEGs open the right way up, faces found in full-length and low-key shots, a Rotate 90° button, relight that follows each face when pasted or in a preset, true colours for iPhone and Adobe RGB JPEGs, and exports that keep the camera's information
 - **2026-10-05 (v1.0.2):** Remove tools move to the top bar, an eye on each slider to switch it off, instant Opacity sliders, faster patching, a histogram behind the tone curve, and Acne finds spots it missed
 - **2026-10-05 (v1.0.1):** New Relight panel and Dehaze, face tools keep off hats, better side profiles, and faster sliders on laptops
 - **2026-10-04 (v1.0.0):** First release: installers for Windows, Mac and Linux with a one-time engine setup, AI models on an NVIDIA GPU, a Mac's GPU or the CPU, plus Pores and Blemishes sliders and panel Opacity
@@ -40,7 +41,7 @@ when you zoom in. Each slider from Skin down has an eye to switch it off and on.
 | **Backdrop** | Smoothing (creases, seams, dust) with matched grain, Evenness, Brightness (±2.5 EV), edge protection for hair; Backdrop / Outdoor mode, detected automatically |
 | **Skin** (Face / Neck / Body tabs) | Acne, Blemishes, Smooth, Even tone, Texture, Pores, Shine (matte ↔ gloss); Wrinkles: forehead, frown, smile and cheek lines, chin, neck lines. Moles are kept. Refine area brush per tab |
 | **Dodge & burn** | Contour, Highlights, Shadows (keeps off hair and hats) |
-| **Relight** | A radial light placed over the face: Exposure, Warmth and Feather, with the circle moved, stretched, turned and feathered by hand |
+| **Relight** | A radial light placed over the face: Exposure, Warmth and Feather, with the circle moved, stretched, turned and feathered by hand; pasted or in a preset, it goes on each photo's own face |
 | **Eyes** | Dark circles, Eye bags, Wrinkles, Eye whites, Eye veins, Iris, Iris saturation, Iris hue, Catch light, Eyelashes |
 | **Mouth** | Lip hue, Lip saturation, Lip smoothing, Teeth whitening |
 | **Clothes** | Fine creases (shadow softening; use Patch for full removal) |
@@ -48,8 +49,10 @@ when you zoom in. Each slider from Skin down has an eye to switch it off and on.
 Skin, Dodge & burn, Eyes and Mouth each have an Opacity that fades the whole panel together.
 
 Plus: a film strip with multi-select, copy/paste of settings, presets, a per-panel
-"Hold for before", crop & straighten, and batch export to 16-bit TIFF or
+"Hold for before", crop & straighten with Rotate 90°, and batch export to 16-bit TIFF or
 maximum-quality JPEG (optionally scaled to a long edge) with a progress bar per photo.
+Opens RAW files from most cameras, TIFF and JPEG; exports keep the original's colour
+profile and camera information (camera, lens, capture date, exposure, copyright).
 
 ## AI models
 
