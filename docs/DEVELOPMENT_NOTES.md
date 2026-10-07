@@ -433,8 +433,11 @@ GPU matters.
   and Feather, moved/stretched/turned/feathered by hand (`RelightOverlay`). No masking, by choice:
   plain smoothstep falloff, as Lightroom's radial filter. Applied with the tone (per pixel, after
   the retouching, left out of the cache keys), so its sliders never rerun anything. The engine
-  still supports `invert` (outside the circle); the UI button was taken out. Per photo: copy/paste
-  carries it, presets don't (like crop).
+  still supports `invert` (outside the circle); the UI button was taken out. Pasted onto another
+  photo or saved in a preset, it carries its strength with `auto: true`, and the engine's `_look`
+  places it on that photo's face (`relight_default`, from the faces found anyway); once the photo
+  is open the app fetches the place so the circle shows there. Pasting back onto the photo it was
+  copied from keeps the hand-placed circle; presets saved before this keep each photo's own.
 - Dehaze (Tone): takes off the photo's own haze veil (`haze_veil`: the 0.5th percentile, linear
   light, measured once per photo from the preview so preview, zoom and export match) plus a little
   more, and gives back colour; below zero adds a mist. A fixed veil crushed low-key portraits.
@@ -447,6 +450,32 @@ GPU matters.
   detail render gives way between steps (`Engine._checkpoint`, and `interrupt.check()` between the
   skin tools) as soon as anything newer is waiting; its finished steps stay cached. P1024004 on 8
   cores: preview back 0.6 s after the move instead of ~2 s.
+
+- After 1.0.2 (2026-10-07), from testers' JPEGs:
+  - JPEG/TIFF orientation: `imageio.load` ignored the EXIF/TIFF orientation tag (thumbnails used
+    it), so portrait JPEGs (a Nikon Z 6II's, phones') opened sideways, faces weren't found and the
+    thumbnail and opened sizes disagreed. Applied on load now (`_orient` for TIFF).
+  - Small faces: MediaPipe's detector sees a ~128 px copy, so a full-length subject's face is a few
+    pixels. `_find` also searches overlapping square tiles (1/2 and 1/4 of the short side, half
+    overlap, ~0.25 s per photo); a tile's face touching an inner tile edge is dropped, the widest of
+    each face is kept, and a face only a tile found must be found again close up (leaves, a
+    shoulder under bluebells and grass passed in tiles; none survived the re-check). No face at
+    all: one retry on a brightened copy (low-key DSC_2425/2426). Studio set: +10 photos with a face,
+    none lost or added falsely. Still missed: tiny soft faces in woodland wide shots (DSCF7095/96)
+    and strict side profiles (MediaPipe needs both eyes).
+  - Rotate 90° (Crop bar): quarter turns per photo (`turnsByPath`, not in presets/paste), applied
+    by the engine on open and to thumbnails; turning restarts that photo's crop, relight and
+    strokes/masks (the engine drops its kept session when `turns` differs).
+  - Only RAW, TIFF and JPEG open (`imageio.SUPPORTED`; PNG dropped from the dialog, picked files
+    filtered, the engine refuses others). Pillow's 179 MP decompression-bomb limit is lifted.
+  - Previews and thumbnails are converted to sRGB for the screen (`imageio.to_display`, LittleCMS
+    on bands of rows: 37 → 9 ms per 2048 px preview); exports keep the photo's own profile. Display
+    P3 (iPhone) and Adobe RGB JPEGs looked washed out. JPEG vs 16-bit TIFF of the same photo with a
+    full retouch: same faces, edit correlation 0.92-0.99, JPEG blockiness not amplified.
+  - Exports carry the original's camera information (`metadata.py`): camera, lens, date, exposure,
+    author, copyright, GPS; not orientation, size, thumbnail or maker notes. TIFF-based RAWs and
+    JPEG/TIFF are read directly, RW2/RAF/CR3 from the embedded preview JPEG. JPEG exports get EXIF;
+    16-bit TIFFs (tifffile can't write the EXIF sub-IFD) get the basic tags plus XMP.
 
 - Background preparation: preload models at start-up and find mask, faces and hair while
   browsing (first preview 4.3 s → ~instant).

@@ -18,6 +18,7 @@ import {
   Smile,
   Glasses,
   RotateCcw,
+  RotateCw,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
@@ -73,8 +74,19 @@ interface PhotoSettings {
 }
 /** Relight: a radial gradient over the face (see RelightOverlay and the
  * engine's tools/relight.py). */
-type Relight = RelightShape & { feather: number; exposure: number; warmth: number; invert: boolean };
+type Relight = RelightShape & {
+  feather: number;
+  exposure: number;
+  warmth: number;
+  invert: boolean;
+  // Pasted or from a preset: the engine places it on this photo's face (its
+  // shape here is a stand-in until the photo opens and the place is fetched).
+  auto?: boolean;
+};
+/** A relight's strength, to be placed on another photo's face. */
+const autoRelight = (r: Relight | null): Relight | null => (r ? { ...r, auto: true } : null);
 const RELIGHT_LOOK = { feather: 0.6, exposure: 0.5, warmth: 0, invert: false };
+const RELIGHT_STANDIN: RelightShape = { cx: 0.5, cy: 0.45, rx: 0.22, ry: 0.28, angle: 0 };
 /** The engine's relight setting: null while it would change nothing. */
 const relightLook = (r: Relight | null) => (r && (r.exposure !== 0 || r.warmth !== 0) ? r : null);
 /** Each face panel's overall amount (0..1): its whole result faded toward the
@@ -475,7 +487,12 @@ function withPreset(
     },
     crop,
     opacity: { ...OPACITY_DEFAULTS, ...(obj(saved.opacity) as Partial<Opacity>) },
-    relight,
+    // Presets saved before relight was in them keep the photo's own.
+    relight: !("relight" in saved)
+      ? relight
+      : saved.relight && typeof saved.relight === "object"
+        ? ({ ...RELIGHT_STANDIN, ...RELIGHT_LOOK, ...obj(saved.relight), auto: true } as Relight)
+        : null,
     off: Array.isArray(saved.off) ? saved.off.filter((k): k is string => typeof k === "string") : [],
   };
 }
@@ -567,7 +584,8 @@ const SKIN_SLIDERS: {
 // so every filter lists both cases.
 const bothCases = (exts: string[]) => exts.flatMap((e) => [e, e.toUpperCase()]);
 
-const IMAGE_EXTENSIONS = ["tif", "tiff", "jpg", "jpeg", "png"];
+// RAW, TIFF and JPEG only; keep in sync with the engine (imageio.SUPPORTED).
+const IMAGE_EXTENSIONS = ["tif", "tiff", "jpg", "jpeg"];
 // Developed by LibRaw in the engine; keep in sync with engine imageio.RAW_EXTENSIONS.
 const RAW_EXTENSIONS = [
   "rw2", "nef", "nrw", "cr2", "cr3", "crw", "arw", "srf", "sr2", "raf", "orf", "dng",
@@ -767,9 +785,14 @@ export default function App() {
   // Film strip: every photo opened this session, each with its own settings.
   const [strip, setStrip] = useState<StripItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [copied, setCopied] = useState<PhotoSettings | null>(null);
+  const [copied, setCopied] = useState<{ from: string; settings: PhotoSettings } | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const settingsByPath = useRef(new Map<string, PhotoSettings>());
+  // Quarter turns clockwise per photo (Crop's 90° button), applied by the
+  // engine as it opens the photo. Not a PhotoSettings field, so presets and
+  // copy/paste never turn another photo.
+  const turnsByPath = useRef(new Map<string, number>());
+  const turnsOf = (path: string) => turnsByPath.current.get(path) ?? 0;
   // Switching photo: a progress bar (on its thumbnail and along the top of the
   // viewer) while it's prepared, nudged on by each step the engine reports.
   const [prep, setPrep] = useState<{ path: string; fraction: number } | null>(null);
@@ -1046,7 +1069,7 @@ export default function App() {
     stopCountdown();
     const done = (async () => {
       try {
-        const r = await call<OpenResult>("open", { path });
+        const r = await call<OpenResult>("open", { path, turns: turnsOf(path) });
         openedPath.current = path;
         openedInfo.current = { ...r, path };
         if (activePath.current === path) {
@@ -1208,6 +1231,23 @@ export default function App() {
     if (!next) setRelightEditing(false);
     render();
   };
+  // A pasted or preset relight: once its photo is open, fetch where the engine
+  // put it (the face), so the circle shows and edits there. Same place, so no
+  // re-render.
+  useEffect(() => {
+    const r = relight;
+    if (!r?.auto || !image?.bit_depth || openedPath.current !== image.path) return;
+    const path = image.path;
+    call<RelightShape>("relight_default")
+      .then((shape) => {
+        if (activePath.current !== path || relightRef.current !== r) return;
+        const placed: Relight = { ...r, ...shape, auto: false };
+        relightRef.current = placed;
+        setRelight(placed);
+      })
+      .catch(handleError);
+  }, [relight, image, handleError]);
+
   /** A new relight, over the face (the engine finds it). */
   const addRelight = async () => {
     try {
@@ -1506,6 +1546,7 @@ export default function App() {
       }>("thumbnail", {
         path,
         edge: PREVIEW_EDGE,
+        turns: turnsOf(path),
       });
       if (activePath.current !== path) return;
       // Its camera preview is showing; the bar carries on until the
@@ -1544,7 +1585,14 @@ export default function App() {
         { name: "Images", extensions: bothCases(IMAGE_EXTENSIONS) },
       ],
     });
-    const paths = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
+    const chosen = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
+    // A dialog can still let other files through (typed names, "All files").
+    const ok = new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS]);
+    const paths = chosen.filter((p) => ok.has(p.split(".").pop()?.toLowerCase() ?? ""));
+    if (paths.length < chosen.length) {
+      const n = chosen.length - paths.length;
+      setStatus(`Skipped ${n} file${n === 1 ? "" : "s"}: RapidRetouch opens RAW, TIFF and JPEG files`);
+    }
     if (!paths.length) return;
     const known = new Set(strip.map((i) => i.path));
     const added = paths.filter((p) => !known.has(p));
@@ -1552,6 +1600,24 @@ export default function App() {
     const first = added[0] ?? paths[0];
     setSelected(new Set([first]));
     if (first !== image?.path) await loadImage(first);
+  };
+
+  /** Turn the photo being edited a quarter clockwise. Its crop, relight
+   * circle and the engine's strokes, masks and faces were placed on the old
+   * orientation, so they start afresh (the engine drops its kept ones when
+   * the turn differs). */
+  const rotateQuarter = async () => {
+    const path = activePath.current;
+    if (!path) return;
+    turnsByPath.current.set(path, (turnsOf(path) + 1) % 4);
+    cropRef.current = NO_CROP;
+    setCrop(NO_CROP);
+    relightRef.current = null;
+    setRelight(null);
+    openedPath.current = null;
+    openedInfo.current = null;
+    setStrip((items) => items.map((i) => (i.path === path ? { ...i, thumb: undefined } : i)));
+    await loadImage(path);
   };
 
   /** Set Backdrop/Outdoor from detection, for a photo the user hasn't set up. */
@@ -1585,7 +1651,7 @@ export default function App() {
     const next = strip.find((i) => !i.thumb);
     if (!next || loadingThumb.current || !engineReady || busy) return;
     loadingThumb.current = true;
-    call<{ image: string; scene: "backdrop" | "outdoor" }>("thumbnail", { path: next.path })
+    call<{ image: string; scene: "backdrop" | "outdoor" }>("thumbnail", { path: next.path, turns: turnsOf(next.path) })
       .then((r) => {
         setStrip((items) =>
           items.map((i) => (i.path === next.path ? { ...i, thumb: r.image, scene: r.scene } : i)),
@@ -1607,6 +1673,7 @@ export default function App() {
     setStrip(rest);
     setSelected((sel) => new Set([...sel].filter((p) => p !== path)));
     settingsByPath.current.delete(path);
+    turnsByPath.current.delete(path);
     if (image?.path === path) {
       const neighbour = rest[Math.min(idx, rest.length - 1)];
       if (neighbour) {
@@ -1639,7 +1706,8 @@ export default function App() {
 
 
   const copySettings = () => {
-    setCopied(currentSettings());
+    if (!image) return;
+    setCopied({ from: image.path, settings: currentSettings() });
     setStatus("Settings copied");
   };
 
@@ -1647,15 +1715,19 @@ export default function App() {
     if (!copied) return;
     let pasted = 0;
     for (const path of selected) {
+      // The relight circle was on the copied photo's face: on another photo
+      // it goes on that one's.
+      const st =
+        path === copied.from ? copied.settings : { ...copied.settings, relight: autoRelight(copied.settings.relight) };
       autoMode.current.delete(path); // a pasted mode is the user's choice
       if (path === image?.path) setModeIsAuto(false);
       if (path === image?.path) {
-        applySettings(copied);
+        applySettings(st);
         render();
       } else {
-        settingsByPath.current.set(path, copied);
+        settingsByPath.current.set(path, st);
       }
-      markEdited(path, copied);
+      markEdited(path, st);
       pasted++;
     }
     setStatus(`Settings pasted to ${pasted} photo${pasted === 1 ? "" : "s"}`);
@@ -1670,7 +1742,9 @@ export default function App() {
     return paths.length ? paths : image ? [image.path] : [];
   };
   const savePreset = async (name: string) => {
-    const { outdoor: _mode, crop: _crop, relight: _relight, ...settings } = currentSettings();
+    const { outdoor: _mode, crop: _crop, relight, ...rest } = currentSettings();
+    // The relight's strength; each photo it's applied to gets it on its own face.
+    const settings = { ...rest, relight: autoRelight(relight) };
     try {
       setPresets(await call<Preset[]>("save_preset", { name, settings }));
       setStatus(`Saved preset "${name}"`);
@@ -2011,7 +2085,7 @@ export default function App() {
         }
         if (!st) st = ALL_DEFAULTS;
         if (openedPath.current !== path) {
-          const r = await call<OpenResult>("open", { path });
+          const r = await call<OpenResult>("open", { path, turns: turnsOf(path) });
           openedPath.current = path;
           openedInfo.current = { ...r, path };
         }
@@ -2414,6 +2488,12 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <button
+              onClick={rotateQuarter}
+              title="Rotate 90° clockwise, for a photo that opened sideways. Starts its crop, relight circle and brush, patch and mask work afresh"
+            >
+              <RotateCw size={14} /> 90°
+            </button>
             <button onClick={() => updateCrop(NO_CROP)} title="Back to the whole photo, unturned">
               <RotateCcw size={14} /> Reset
             </button>

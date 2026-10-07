@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import imageio, interrupt, presets, system
+from . import imageio, interrupt, metadata, presets, system
 from .registry import LicenceNotAccepted, Registry
 from .tools import backdrop_smooth, dodge_burn, fabric, inpaint, mask_edit, patch, reflection, region_edit, relight, scene, tone
 from .tools import crop as crop_tool
@@ -34,6 +34,17 @@ from .tools import mouth as mouth_tool
 from .tools import skin as skin_tool
 
 PREVIEW_EDGE = 2048
+def _software() -> str:
+    """For exports' Software tag: "RapidRetouch 1.0.3"."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f"RapidRetouch {version('rapidretouch-engine')}"
+    except PackageNotFoundError:
+        return "RapidRetouch"
+
+
+SOFTWARE = _software()
 EXPORT_BIT_DEPTH = 16  # TIFF exports are 16-bit (JPEGs are 8-bit by nature)
 # The settings record (<export>.retouch.json: every step, its settings, the
 # edits and the AI models used) is off for now: it cluttered delivery folders
@@ -96,11 +107,12 @@ def _proxy(img: np.ndarray, edge: int) -> np.ndarray:
     return cv2.resize(img, size, interpolation=cv2.INTER_AREA)
 
 
-def _jpeg_b64(rgb: np.ndarray) -> str:
+def _jpeg_b64(rgb: np.ndarray, icc: bytes | None = None) -> str:
+    """A preview for the app, in sRGB for the screen (``icc``: the photo's
+    own colour space, see imageio.to_display)."""
     buf = io.BytesIO()
-    Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8)).save(
-        buf, "JPEG", quality=90
-    )
+    im = Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+    imageio.to_display(im, icc).save(buf, "JPEG", quality=90)
     return base64.b64encode(buf.getvalue()).decode()
 
 
@@ -128,6 +140,7 @@ class Engine:
         self.registry = Registry()
         self.registry.status = self.status
         self.path: Path | None = None
+        self.turns = 0  # quarter turns clockwise applied to the open photo
         self.image: imageio.LoadedImage | None = None
         self.preview: np.ndarray | None = None
         self.alpha: np.ndarray | None = None  # full-res subject mask, as the model made it
@@ -226,10 +239,13 @@ class Engine:
         self.registry.accept_licence(model_id)
         return {"accepted": model_id}
 
-    def open(self, path: str) -> dict:
+    def open(self, path: str, turns: int = 0) -> dict:
+        """``turns``: quarter turns clockwise, the user's fix for a photo that
+        opens sideways. Applied to the pixels, so everything sees it upright."""
         # Keep the current photo's edits so switching back restores them.
         if self.path is not None:
             self.sessions[str(self.path)] = {
+                "turns": self.turns,
                 "strokes": self.strokes,
                 "mask_edits": self.mask_edits,
                 "region_edits": self.region_edits,
@@ -244,6 +260,9 @@ class Engine:
         self.status(f"Loading {Path(path).name}")
         self.path = Path(path)
         self.image = imageio.load(path)
+        self.turns = int(turns) % 4
+        if self.turns:
+            self.image.rgb = np.ascontiguousarray(np.rot90(self.image.rgb, -self.turns))
         self.preview = _proxy(self.image.rgb, PREVIEW_EDGE)
         self.alpha = self.alpha_preview_raw = self.alpha_preview = None
         self.mask_edits = []
@@ -263,7 +282,8 @@ class Engine:
         self._zoom_tiles, self._face_window_cache = [], {}
         self.edit_version += 1
         saved = self.sessions.pop(str(self.path), None)
-        if saved:
+        # Turned since: its strokes, masks and faces are in the old orientation.
+        if saved and saved.get("turns", 0) == self.turns:
             self.mask_edits = saved["mask_edits"]
             self.region_edits = saved.get("region_edits") or {r: [] for r in region_edit.REGIONS}
             self.faces = saved["faces"]
@@ -284,18 +304,23 @@ class Engine:
             "width": w,
             "height": h,
             "bit_depth": self.image.bit_depth,
-            "preview": _jpeg_b64(self.preview),
+            "preview": _jpeg_b64(self.preview, self.image.icc),
             "removals": len(self.strokes),
             "removal_kinds": self._removal_kinds(),
             "mask_edits": len(self.mask_edits),
             "region_edits": {r: len(v) for r, v in self.region_edits.items()},
         }
 
-    def thumbnail(self, path: str, edge: int = 240) -> dict:
+    def thumbnail(self, path: str, edge: int = 240, turns: int = 0) -> dict:
         """Quick preview (base64 JPEG) for the film strip or for scanning through
         photos, with the photo's full size so the viewer can lay it out, and a
-        guess at studio backdrop vs outdoor (measured at scene.WORK_EDGE)."""
+        guess at studio backdrop vs outdoor (measured at scene.WORK_EDGE).
+        ``turns`` as for open."""
         im, (w, h) = imageio.thumbnail(path, max(edge, scene.WORK_EDGE))
+        if int(turns) % 4:
+            im = im.rotate(-90 * (int(turns) % 4), expand=True)
+            if int(turns) % 2:
+                w, h = h, w
         guess = scene.classify(np.asarray(im, np.float32) / 255)
         im.thumbnail((edge, edge))
         buf = io.BytesIO()
@@ -425,7 +450,7 @@ class Engine:
         self._require_image()
         region = self._region(region)
         shown = region_edit.overlay(self._edited_preview(), self._area(region))
-        return {"preview": _jpeg_b64(shown), "edits": len(self.region_edits[region])}
+        return {"preview": _jpeg_b64(shown, self.image.icc), "edits": len(self.region_edits[region])}
 
     def region_paint(self, region: str, mode: str, points: list[list[float]], radius: float) -> dict:
         """Correct an area: mode "add" takes the brushed part in, "remove" takes it out."""
@@ -452,7 +477,7 @@ class Engine:
 
     def _mask_result(self) -> dict:
         shown = mask_edit.overlay(self._edited_preview(), self.alpha_preview)
-        return {"preview": _jpeg_b64(shown), "mask_edits": len(self.mask_edits)}
+        return {"preview": _jpeg_b64(shown, self.image.icc), "mask_edits": len(self.mask_edits)}
 
     # Every call that returns a preview takes the photo's "look": each tool's
     # settings (None leaves a tool out) and whether to include the removals.
@@ -479,10 +504,16 @@ class Engine:
         unknown = set(look) - set(self.LOOK)
         if unknown:
             raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
-        return {**self.LOOK, **look}
+        look = {**self.LOOK, **look}
+        r = look["relight"]
+        if r and r.get("auto"):
+            # Pasted or from a preset: its strength came from another photo,
+            # its place is this photo's face (found for the face tools anyway).
+            look["relight"] = {k: v for k, v in r.items() if k != "auto"} | self.relight_default()
+        return look
 
     def _preview(self, look: dict) -> str:
-        return _jpeg_b64(self._render(self._look(look)))
+        return _jpeg_b64(self._render(self._look(look)), self.image.icc)
 
     def render(self, **look) -> dict:
         """Preview of the whole pipeline with the given look."""
@@ -1116,7 +1147,7 @@ class Engine:
             crop = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
         crop = relight.apply(crop, look["relight"], (x0, y0, x1, y1), (h, w))
         crop = tone.apply(crop, self._tone(look))
-        return {"image": _jpeg_b64(crop), "region": [x0, y0, x1, y1]}
+        return {"image": _jpeg_b64(crop, self.image.icc), "region": [x0, y0, x1, y1]}
 
     def export(
         self, path: str, crop: dict | None = None, long_edge: int | None = None, background: bool = False, **look
@@ -1142,6 +1173,8 @@ class Engine:
         self._exporting = 0.0
         try:
             rgb, steps = self._full_pipeline(look)
+            if self.turns:  # applied as the photo opened, so first
+                steps.insert(0, {"tool": "rotate", "quarter_turns_clockwise": self.turns})
             if not crop_tool.is_noop(crop):
                 rgb = crop_tool.apply(rgb, crop)
                 steps.append({"tool": "crop", "params": {**crop_tool.IDENTITY, **crop}})
@@ -1155,13 +1188,14 @@ class Engine:
             self.status(f"Writing {out.name}")
             # Untagged originals are treated as sRGB throughout, so say so in the file.
             icc = self.image.icc or imageio._srgb_icc()
+            meta = metadata.read(self.path)
             if background:
                 if self._writing is not None:
                     self._writing.result()  # the previous file first: one at a time
 
-                def write(out=out, rgb=rgb, icc=icc):
+                def write(out=out, rgb=rgb, icc=icc, meta=meta):
                     try:
-                        imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc)
+                        imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc, meta, SOFTWARE)
                         self.emit({"event": "written", "path": str(out)})
                     except Exception as e:  # reported to the app, not lost on this thread
                         traceback.print_exc()
@@ -1169,7 +1203,7 @@ class Engine:
 
                 self._writing = self._writer.submit(write)
             else:
-                imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc)
+                imageio.save(out, rgb, EXPORT_BIT_DEPTH, icc, meta, SOFTWARE)
         finally:
             self._exporting = None
         if not WRITE_SETTINGS_FILE:
