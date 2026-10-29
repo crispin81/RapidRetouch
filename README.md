@@ -1,5 +1,10 @@
 # RapidRetouch
 
+> [!IMPORTANT]
+> **RapidRetouch is now part of RapidOne.** Everything in RapidRetouch is built into RapidOne's **Retouch** tab, alongside fast culling and a full RAW editor, free for Linux, Mac and Windows. New retouching features land in RapidOne first; this standalone version follows a few weeks behind.
+>
+> **[⬇ Get RapidOne](https://github.com/crispin81/RapidOne/releases/latest)** · [About RapidOne](https://github.com/crispin81/RapidOne)
+
 AI-assisted portrait retouching for photographers, in the spirit of Evoto, but open
 source and entirely on your own computer. No uploads, no accounts, no per-image
 credits. Built for studio and outdoor portraits, from 24 MP up to 100 MP medium format.
