@@ -1,5 +1,7 @@
 # RapidRetouch
 
+<p align="center"><a href="https://github.com/crispin81/RapidOne"><img src="docs/rapidone-banner.png" width="880" alt="RapidRetouch is now part of RapidOne. Click to get RapidOne."></a></p>
+
 > [!IMPORTANT]
 > ## ⭐ RapidRetouch is now part of RapidOne
 >
