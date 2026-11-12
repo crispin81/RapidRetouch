@@ -1,9 +1,11 @@
 # RapidRetouch
 
 > [!IMPORTANT]
-> **RapidRetouch is now part of RapidOne.** Everything in RapidRetouch is built into RapidOne's **Retouch** tab, alongside fast culling and a full RAW editor, free for Linux, Mac and Windows. New retouching features land in RapidOne first; this standalone version follows a few weeks behind.
+> ## ⭐ RapidRetouch is now part of RapidOne
 >
-> **[⬇ Get RapidOne](https://github.com/crispin81/RapidOne)**
+> **Everything in RapidRetouch is built into RapidOne's Retouch tab, alongside fast culling and a full RAW editor, free for Linux, Mac and Windows. New retouching features land in RapidOne first; this standalone version follows a few weeks behind.**
+>
+> ### 👉 **[⬇ Get RapidOne (free)](https://github.com/crispin81/RapidOne)**
 
 AI-assisted portrait retouching for photographers, in the spirit of Evoto, but open
 source and entirely on your own computer. No uploads, no accounts, no per-image
@@ -21,7 +23,10 @@ RapidTimelapse.
 <details>
 <summary><strong>Recent Changes</strong></summary>
 
-**[⬇ Download the latest version](https://github.com/crispin81/RapidRetouch/releases/latest)**
+> [!TIP]
+> **Want the newest retouching features first? [⬇ Get RapidOne](https://github.com/crispin81/RapidOne)**, which includes everything in RapidRetouch.
+
+**[⬇ Download the latest standalone RapidRetouch](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
 - **2026-10-07 (v1.0.3):** JPEGs open the right way up, faces found in full-length and low-key shots, a Rotate 90° button, relight that follows each face when pasted or in a preset, true colours for iPhone and Adobe RGB JPEGs, and exports that keep the camera's information
 - **2026-10-05 (v1.0.2):** Remove tools move to the top bar, an eye on each slider to switch it off, instant Opacity sliders, faster patching, a histogram behind the tone curve, and Acne finds spots it missed
