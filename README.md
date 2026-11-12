@@ -1,13 +1,13 @@
 # RapidRetouch
 
-<p align="center"><a href="https://github.com/crispin81/RapidOne"><img src="docs/rapidone-banner.png" width="880" alt="RapidRetouch is now part of RapidOne. All future Retouch updates go to RapidOne only. Click to get RapidOne."></a></p>
+<p align="center"><a href="https://github.com/crispin81/RapidOne"><img src="docs/rapidone-banner.png" width="880" alt="RapidRetouch is now part of RapidOne. The standalone app is on pause while RapidOne gets full focus. Click to get RapidOne."></a></p>
 
 > [!IMPORTANT]
 > ## ⭐ RapidRetouch is now part of RapidOne
 >
 > **Everything in RapidRetouch is built into RapidOne's Retouch tab, alongside fast culling and a full RAW editor, free for Linux, Mac and Windows.**
 >
-> **For the foreseeable future, all Retouch updates (new features and fixes) will go to RapidOne only. This standalone RapidRetouch will not be updated.**
+> **Work on this standalone version is on pause for the foreseeable future, so that all development can go into RapidOne. Every new Retouch feature and fix will be released in RapidOne.**
 >
 > ### 👉 **[⬇ Get RapidOne (free)](https://github.com/crispin81/RapidOne)**
 
@@ -18,7 +18,7 @@ credits. Built for studio and outdoor portraits, from 24 MP up to 100 MP medium 
 Part of a family of apps by Chris Cork Photography, alongside RapidCulling and
 RapidTimelapse.
 
-> **Development continues in [RapidOne](https://github.com/crispin81/RapidOne).**
+> **The standalone app is on pause while development focuses on [RapidOne](https://github.com/crispin81/RapidOne).**
 
 **New to RapidRetouch? Watch the tutorial:**
 
@@ -28,9 +28,9 @@ RapidTimelapse.
 <summary><strong>Recent Changes</strong></summary>
 
 > [!TIP]
-> **All Retouch updates now go to RapidOne only. [⬇ Get RapidOne](https://github.com/crispin81/RapidOne)**, which includes everything in RapidRetouch.
+> **The standalone app is on pause while RapidOne gets full focus. For the latest Retouch features and fixes, [⬇ get RapidOne](https://github.com/crispin81/RapidOne)**, which includes everything in RapidRetouch.
 
-**[⬇ Download the last standalone RapidRetouch](https://github.com/crispin81/RapidRetouch/releases/latest)**
+**[⬇ Download the latest standalone RapidRetouch](https://github.com/crispin81/RapidRetouch/releases/latest)**
 
 - **2026-10-07 (v1.0.3):** JPEGs open the right way up, faces found in full-length and low-key shots, a Rotate 90° button, relight that follows each face when pasted or in a preset, true colours for iPhone and Adobe RGB JPEGs, and exports that keep the camera's information
 - **2026-10-05 (v1.0.2):** Remove tools move to the top bar, an eye on each slider to switch it off, instant Opacity sliders, faster patching, a histogram behind the tone curve, and Acne finds spots it missed
